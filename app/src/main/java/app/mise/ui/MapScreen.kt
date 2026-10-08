@@ -5,10 +5,12 @@ import android.annotation.SuppressLint
 import android.location.Location
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -43,7 +45,7 @@ private data class Area(val name: String, val latLng: LatLng)
 private data class SuggestionRow(val title: String, val subtitle: String?, val saved: Boolean, val onClick: () -> Unit)
 
 @SuppressLint("MissingPermission") // guarded by hasLocation
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     val context = LocalContext.current
@@ -240,6 +242,7 @@ private fun LocationSearchField(query: String, onQuery: (String) -> Unit, onClea
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun NearbyPanel(
     modifier: Modifier,
@@ -255,30 +258,45 @@ private fun NearbyPanel(
     Surface(
         modifier = modifier,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        shape = RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp),
     ) {
         Column {
+            Box(
+                Modifier.align(Alignment.CenterHorizontally).padding(top = 10.dp)
+                    .size(width = 36.dp, height = 4.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant, CircleShape),
+            )
             if (focus != null) {
                 Surface(
                     onClick = onOpenDetails,
                     color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp),
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
                 ) {
-                    Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.padding(start = 20.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(focus.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                            Text(focus.name, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1)
                             val sub = listOfNotNull(rating?.let { "★ %.1f (%,d)".format(it.first, it.second) }, focus.cuisine).joinToString(" · ")
-                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodySmall)
+                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodyMedium)
                         }
-                        TextButton(onOpenDetails) { Text("Details") }
+                        Button(onOpenDetails, shapes = ButtonDefaults.shapes()) { Text("Details") }
                         IconButton(onClearFocus) { Icon(Icons.Filled.Close, "Close") }
                     }
                 }
             }
-            Row(Modifier.padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, modifier = Modifier.weight(1f))
-                if (hasCenter) Text("${rows.size} within $NEARBY_MILES mi", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.padding(start = 24.dp, end = 16.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, modifier = Modifier.weight(1f))
+                if (hasCenter) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Text(
+                            "${rows.size} within $NEARBY_MILES mi",
+                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                }
             }
             val empty = when {
                 !hasCenter -> "Allow location, or search a city to see your spots near it."
@@ -286,16 +304,26 @@ private fun NearbyPanel(
                 else -> null
             }
             if (empty != null) {
-                Text(empty, Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(empty, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            LazyColumn(contentPadding = WindowInsets.navigationBars.asPaddingValues()) {
-                items(rows, key = { it.first.id }) { (p, dist) ->
-                    ListItem(
-                        headlineContent = { Text(p.name) },
-                        supportingContent = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable { onPick(p) },
-                    )
+            LazyColumn(
+                contentPadding = PaddingValues(
+                    start = 12.dp, end = 12.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
+                ),
+                verticalArrangement = Arrangement.spacedBy(SegmentedGap),
+            ) {
+                itemsIndexed(rows, key = { _, r -> r.first.id }) { i, (p, dist) ->
+                    SegmentedItem(
+                        index = i, count = rows.size, onClick = { onPick(p) },
+                        leading = {
+                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.size(44.dp)) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Restaurant, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                                }
+                            }
+                        },
+                        supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
+                    ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
                 }
             }
         }
