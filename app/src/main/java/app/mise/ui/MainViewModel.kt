@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.mise.data.*
+import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -38,8 +39,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val details: StateFlow<DetailsState> = _details
     private val detailsCache = HashMap<String, PlaceDetails>()
 
-    private val _import = MutableStateFlow(ImportProgress())
-    val import: StateFlow<ImportProgress> = _import
+    private val _progress = MutableStateFlow(ImportProgress())
+    val progress: StateFlow<ImportProgress> = _progress
+
+    private val _review = MutableStateFlow<List<ParsedEntry>>(emptyList())
+    val review: StateFlow<List<ParsedEntry>> = _review
+
+    // --- selection / details -------------------------------------------------
 
     fun select(place: SavedPlace?) {
         selectedId.value = place?.id
@@ -55,13 +61,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun addNote(text: String) {
+    fun addDish(text: String) {
         val id = selectedId.value ?: return
         if (text.isBlank()) return
         viewModelScope.launch { dao.insertNote(DishNote(placeId = id, text = text.trim())) }
     }
-    fun toggleNote(n: DishNote) = viewModelScope.launch { dao.updateNote(n.copy(tried = !n.tried)) }
-    fun deleteNote(n: DishNote) = viewModelScope.launch { dao.deleteNote(n) }
+    fun toggleDish(n: DishNote) = viewModelScope.launch { dao.updateNote(n.copy(tried = !n.tried)) }
+    fun deleteDish(n: DishNote) = viewModelScope.launch { dao.deleteNote(n) }
+
+    fun saveNotes(text: String) = updateSelected { it.copy(notes = text.trim().ifBlank { null }) }
+    fun saveCuisine(text: String) = updateSelected { it.copy(cuisine = text.trim().ifBlank { null }) }
+    private fun updateSelected(change: (SavedPlace) -> SavedPlace) {
+        val p = selected.value ?: return
+        viewModelScope.launch { dao.update(change(p)) }
+    }
 
     fun deleteSelected() {
         val p = selected.value ?: return
@@ -69,32 +82,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { dao.delete(p) }
     }
 
-    /** Lines like "Name, City", "Name - City", "Name | City", or just "Name" (uses defaultCity). */
-    fun importList(raw: String, defaultCity: String) {
-        if (_import.value.running) return
-        val entries = raw.lines().map { it.trim().trimStart('-', '*', '•', ' ') }.filter { it.isNotEmpty() }.map { line ->
-            val parts = line.split(" - ", "|", ",").map { it.trim() }.filter { it.isNotEmpty() }
-            parts.first() to (parts.drop(1).joinToString(" ").ifBlank { defaultCity })
+    // --- location search ---------------------------------------------------
+
+    suspend fun suggest(query: String, near: LatLng?): List<Suggestion> =
+        runCatching { repo.suggest(query, near) }.getOrDefault(emptyList())
+
+    suspend fun locate(placeId: String): Pair<String, LatLng>? = runCatching { repo.locate(placeId) }.getOrNull()
+
+    // --- adding places -------------------------------------------------------
+
+    /** Manual add form. [onDone] gets true when Google found a matching location. */
+    fun addPlace(name: String, location: String, cuisine: String, dishes: String, notes: String, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            onDone(savePlace(name.trim(), location.trim(), cuisine, ListParser.splitDishes(dishes), notes))
         }
+    }
+
+    private suspend fun savePlace(name: String, location: String, cuisine: String?, dishes: List<String>, notes: String?): Boolean {
+        if (dao.countDuplicates(name, location) > 0) return true
+        val match = runCatching { repo.match(name, location) }.getOrNull()
+        val id = dao.insert(
+            SavedPlace(
+                name = name, city = location,
+                googlePlaceId = match?.placeId,
+                lat = match?.latLng?.latitude, lng = match?.latLng?.longitude,
+                address = match?.address,
+                cuisine = cuisine?.trim()?.ifBlank { null },
+                notes = notes?.trim()?.ifBlank { null },
+            )
+        )
+        dishes.forEach { dao.insertNote(DishNote(placeId = id, text = it)) }
+        return match != null
+    }
+
+    // --- bulk import: parse -> review -> commit ------------------------------
+
+    fun parseForReview(raw: String, defaultLocation: String) {
+        _progress.value = ImportProgress()
+        _review.value = ListParser.parse(raw, defaultLocation.trim())
+    }
+
+    fun updateEntry(id: Int, change: (ParsedEntry) -> ParsedEntry) {
+        _review.update { list -> list.map { if (it.id == id) change(it) else it } }
+    }
+
+    fun removeEntry(id: Int) = _review.update { list -> list.filterNot { it.id == id } }
+
+    fun commitReview() {
+        if (_progress.value.running) return
+        val entries = _review.value.filter { it.name.isNotBlank() }
         viewModelScope.launch {
             val failed = mutableListOf<String>()
-            _import.value = ImportProgress(total = entries.size, running = true)
-            entries.forEachIndexed { i, (name, city) ->
-                if (dao.countDuplicates(name, city) == 0) {
-                    val match = runCatching { repo.match(name, city) }.getOrNull()
-                    if (match == null) failed += "$name ($city)"
-                    dao.insert(
-                        SavedPlace(
-                            name = name, city = city,
-                            googlePlaceId = match?.placeId,
-                            lat = match?.latLng?.latitude, lng = match?.latLng?.longitude,
-                            address = match?.address,
-                        )
-                    )
-                }
-                _import.value = ImportProgress(i + 1, entries.size, failed.toList(), running = true)
+            _progress.value = ImportProgress(total = entries.size, running = true)
+            entries.forEachIndexed { i, e ->
+                val text = e.text.trim()
+                val ok = savePlace(
+                    name = e.name.trim(), location = e.location.trim(),
+                    cuisine = text.takeIf { e.kind == EntryKind.Cuisine },
+                    dishes = if (e.kind == EntryKind.Dish) ListParser.splitDishes(text) else emptyList(),
+                    notes = text.takeIf { e.kind == EntryKind.Note },
+                )
+                if (!ok) failed += "${e.name} (${e.location})"
+                _progress.value = ImportProgress(i + 1, entries.size, failed.toList(), running = true)
             }
-            _import.value = _import.value.copy(running = false)
+            _progress.value = _progress.value.copy(running = false)
+            _review.value = emptyList()
         }
     }
 

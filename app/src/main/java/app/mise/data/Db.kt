@@ -2,6 +2,8 @@ package app.mise.data
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /** A restaurant/food spot from the user's list. lat/lng/googlePlaceId are null until matched via Places. */
@@ -14,6 +16,8 @@ data class SavedPlace(
     val lat: Double? = null,
     val lng: Double? = null,
     val address: String? = null,
+    val cuisine: String? = null,
+    val notes: String? = null,
 )
 
 /** One bullet in a place's list: a dish tried (tried = true) or wanted (tried = false). */
@@ -51,15 +55,22 @@ interface PlaceDao {
     @Delete suspend fun deleteNote(note: DishNote)
 }
 
-@Database(entities = [SavedPlace::class, DishNote::class], version = 1, exportSchema = false)
+@Database(entities = [SavedPlace::class, DishNote::class], version = 2, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): PlaceDao
 
     companion object {
         @Volatile private var instance: AppDb? = null
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN cuisine TEXT")
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN notes TEXT")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "mise.db")
-                .build().also { instance = it }
+                .addMigrations(MIGRATION_1_2).build().also { instance = it }
         }
     }
 }

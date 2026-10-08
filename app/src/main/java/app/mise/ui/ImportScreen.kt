@@ -10,54 +10,45 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
-/** Paste your existing list; each line is matched against Google Places to get an exact pin. */
+/** One-time bulk import: paste a list, then review how each line was split before anything is saved. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ImportScreen(vm: MainViewModel, onBack: () -> Unit) {
+fun ImportScreen(vm: MainViewModel, onBack: () -> Unit, onReview: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
-    var city by rememberSaveable { mutableStateOf("") }
-    val progress by vm.import.collectAsStateWithLifecycle()
+    var location by rememberSaveable { mutableStateOf("") }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Import list") },
+                title = { Text("Bulk import") },
                 navigationIcon = { IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             )
         },
     ) { padding ->
         Column(
-            Modifier.padding(padding).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
+            Modifier.padding(padding).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()).imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "One place per line, like:\nJoe's Pizza, New York\nBlue Bottle - Oakland\nTaco Stand",
+                "Paste your list, one place per line. Lines like -- Columbia, MD -- set the location for the places below them. " +
+                    "Anything in parentheses at the end of a line is sorted into cuisine, dish or note on the next screen.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             OutlinedTextField(
-                value = city, onValueChange = { city = it }, singleLine = true,
-                label = { Text("Default city (for lines without one)") }, modifier = Modifier.fillMaxWidth(),
+                location, { location = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                label = { Text("Default location (optional)") },
+                supportingText = { Text("Used for lines before any -- header --") },
             )
             OutlinedTextField(
-                value = text, onValueChange = { text = it },
-                label = { Text("Your list") }, modifier = Modifier.fillMaxWidth().heightIn(min = 240.dp),
+                text, { text = it }, label = { Text("Your list") },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 280.dp),
             )
             Button(
-                onClick = { vm.importList(text, city.trim()) },
-                enabled = text.isNotBlank() && !progress.running,
+                onClick = { vm.parseForReview(text, location); onReview() },
+                enabled = text.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (progress.running) "Matching…" else "Find on map") }
-
-            if (progress.total > 0) {
-                LinearProgressIndicator(progress = { progress.done / progress.total.toFloat() }, modifier = Modifier.fillMaxWidth())
-                Text("${progress.done} / ${progress.total} processed")
-                if (progress.failed.isNotEmpty()) {
-                    Text("Couldn't match (saved without a pin):", style = MaterialTheme.typography.titleSmall)
-                    progress.failed.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
-                }
-            }
+            ) { Text("Review") }
             Spacer(Modifier.height(24.dp))
         }
     }

@@ -4,7 +4,10 @@ import android.content.Context
 import app.mise.BuildConfig
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.libraries.places.api.Places
+import com.google.android.libraries.places.api.model.AutocompleteSessionToken
+import com.google.android.libraries.places.api.model.CircularBounds
 import com.google.android.libraries.places.api.model.Place
+import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRequest
 import com.google.android.libraries.places.api.net.FetchPlaceRequest
 import com.google.android.libraries.places.api.net.SearchByTextRequest
 import kotlinx.coroutines.tasks.await
@@ -12,16 +15,11 @@ import kotlinx.coroutines.tasks.await
 /** Matched location for a list entry. */
 data class PlaceMatch(val placeId: String, val latLng: LatLng, val address: String?)
 
-/** What the bottom sheet shows from Google Maps data. */
-data class PlaceDetails(
-    val rating: Double?,
-    val ratingCount: Int?,
-    val summary: String?,
-    val address: String?,
-    val reviews: List<ReviewSnippet>,
-)
+/** What the sheet shows from Google Maps data: just the star rating. */
+data class PlaceDetails(val rating: Double?, val ratingCount: Int?)
 
-data class ReviewSnippet(val author: String, val rating: Double, val text: String)
+/** One autocomplete row for the location search. */
+data class Suggestion(val placeId: String, val primary: String, val secondary: String?)
 
 /** Thin wrapper over Places SDK (New). All Google-specific code lives here so it's easy to swap. */
 class PlacesRepository(context: Context) {
@@ -44,20 +42,28 @@ class PlacesRepository(context: Context) {
     }
 
     suspend fun details(googlePlaceId: String): PlaceDetails {
-        val fields = listOf(
-            Place.Field.RATING, Place.Field.USER_RATING_COUNT, Place.Field.EDITORIAL_SUMMARY,
-            Place.Field.FORMATTED_ADDRESS, Place.Field.REVIEWS,
-        )
+        val fields = listOf(Place.Field.RATING, Place.Field.USER_RATING_COUNT)
         val p = client.fetchPlace(FetchPlaceRequest.newInstance(googlePlaceId, fields)).await().place
-        return PlaceDetails(
-            rating = p.rating,
-            ratingCount = p.userRatingCount,
-            summary = p.editorialSummary,
-            address = p.formattedAddress,
-            reviews = p.reviews.orEmpty().mapNotNull { r ->
-                val text = r.text?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                ReviewSnippet(r.authorAttribution.name, r.rating, text)
-            },
-        )
+        return PlaceDetails(rating = p.rating, ratingCount = p.userRatingCount)
+    }
+
+    // One session token per search: autocomplete keystrokes + the final place lookup are billed as one.
+    private var token = AutocompleteSessionToken.newInstance()
+
+    suspend fun suggest(query: String, near: LatLng?): List<Suggestion> {
+        val b = FindAutocompletePredictionsRequest.builder().setQuery(query).setSessionToken(token)
+        near?.let { b.setLocationBias(CircularBounds.newInstance(it, 50_000.0)) }
+        return client.findAutocompletePredictions(b.build()).await().autocompletePredictions.map {
+            Suggestion(it.placeId, it.getPrimaryText(null).toString(), it.getSecondaryText(null)?.toString())
+        }
+    }
+
+    /** Resolve a picked suggestion to a name and coordinates. */
+    suspend fun locate(placeId: String): Pair<String, LatLng>? {
+        val req = FetchPlaceRequest.builder(placeId, listOf(Place.Field.DISPLAY_NAME, Place.Field.LOCATION))
+            .setSessionToken(token).build()
+        val p = client.fetchPlace(req).await().place
+        token = AutocompleteSessionToken.newInstance()
+        return (p.displayName ?: "") to (p.location ?: return null)
     }
 }

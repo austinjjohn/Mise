@@ -28,6 +28,15 @@ android {
         buildConfigField("String", "MAPS_API_KEY", "\"$mapsKey\"")
     }
 
+    buildTypes {
+        // Personal-use build: signed with the debug key (same SHA-1 as the API key restriction),
+        // but not debuggable, so Compose and the map run much smoother than in the debug build.
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -37,6 +46,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
 dependencies {

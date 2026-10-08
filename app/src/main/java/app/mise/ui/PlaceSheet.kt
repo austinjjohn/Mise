@@ -9,18 +9,18 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.PlaceDetails
 import app.mise.data.SavedPlace
+import kotlinx.coroutines.delay
 
-/** Bottom sheet: Google gist on top, user's dish bullets below. */
+/** Detail sheet: Google gist on top, then the user's dishes, notes and cuisine. */
 @Composable
 fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
     val details by vm.details.collectAsStateWithLifecycle()
-    val notes by vm.notes.collectAsStateWithLifecycle()
+    val dishes by vm.notes.collectAsStateWithLifecycle()
     var draft by remember(place.id) { mutableStateOf("") }
 
     LazyColumn(
@@ -37,7 +37,7 @@ fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
                 DetailsState.Idle -> {}
                 DetailsState.Loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 is DetailsState.Error -> Text(d.message, color = MaterialTheme.colorScheme.error)
-                is DetailsState.Loaded -> GoogleGist(d.details)
+                is DetailsState.Loaded -> RatingChip(d.details)
             }
         }
         item {
@@ -45,11 +45,11 @@ fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
             Text("Dishes", style = MaterialTheme.typography.titleLarge)
             Text("Check off what you've tried", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        items(notes, key = { it.id }) { note ->
+        items(dishes, key = { it.id }) { dish ->
             ListItem(
-                headlineContent = { Text(note.text) },
-                leadingContent = { Checkbox(checked = note.tried, onCheckedChange = { vm.toggleNote(note) }) },
-                trailingContent = { IconButton({ vm.deleteNote(note) }) { Icon(Icons.Filled.Close, "Delete") } },
+                headlineContent = { Text(dish.text) },
+                leadingContent = { Checkbox(checked = dish.tried, onCheckedChange = { vm.toggleDish(dish) }) },
+                trailingContent = { IconButton({ vm.deleteDish(dish) }) { Icon(Icons.Filled.Close, "Delete") } },
             )
         }
         item {
@@ -60,9 +60,16 @@ fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
                 label = { Text("Add a dish") },
                 singleLine = true,
                 trailingIcon = {
-                    IconButton({ vm.addNote(draft); draft = "" }, enabled = draft.isNotBlank()) { Icon(Icons.Filled.Add, "Add") }
+                    IconButton({ vm.addDish(draft); draft = "" }, enabled = draft.isNotBlank()) { Icon(Icons.Filled.Add, "Add") }
                 },
             )
+        }
+        item {
+            Spacer(Modifier.height(8.dp))
+            AutoSaveField(place.id, place.notes.orEmpty(), "Notes", singleLine = false, onSave = vm::saveNotes)
+        }
+        item {
+            AutoSaveField(place.id, place.cuisine.orEmpty(), "Cuisine", singleLine = true, onSave = vm::saveCuisine)
         }
         item {
             TextButton({ vm.deleteSelected() }, Modifier.padding(bottom = 16.dp)) { Text("Remove from my list") }
@@ -70,25 +77,30 @@ fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Text field that saves itself shortly after typing stops. */
 @Composable
-private fun GoogleGist(d: PlaceDetails) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        d.rating?.let {
-            AssistChip(
-                onClick = {},
-                leadingIcon = { Icon(Icons.Filled.Star, null, Modifier.size(18.dp)) },
-                label = { Text("%.1f  ·  %,d reviews".format(it, d.ratingCount ?: 0)) },
-            )
-        }
-        d.summary?.let { Text(it, style = MaterialTheme.typography.bodyLarge) }
-        d.reviews.take(3).forEach { r ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp)) {
-                    Text("${r.author} · ${"★".repeat(r.rating.toInt())}", style = MaterialTheme.typography.labelLarge)
-                    Text(r.text, style = MaterialTheme.typography.bodyMedium, maxLines = 4)
-                }
-            }
+private fun AutoSaveField(key: Any, saved: String, label: String, singleLine: Boolean, onSave: (String) -> Unit) {
+    var text by remember(key) { mutableStateOf(saved) }
+    LaunchedEffect(text) {
+        if (text != saved) {
+            delay(400)
+            onSave(text)
         }
     }
+    OutlinedTextField(
+        value = text, onValueChange = { text = it }, label = { Text(label) },
+        singleLine = singleLine, minLines = if (singleLine) 1 else 3,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RatingChip(d: PlaceDetails) {
+    val rating = d.rating ?: return
+    AssistChip(
+        onClick = {},
+        leadingIcon = { Icon(Icons.Filled.Star, null, Modifier.size(18.dp)) },
+        label = { Text("%.1f  ·  %,d ratings".format(rating, d.ratingCount ?: 0)) },
+    )
 }
