@@ -7,6 +7,11 @@ import android.location.Location
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
@@ -26,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -44,6 +50,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -149,6 +156,17 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
         focusManager.clearFocus()
     }
 
+    // The map's bottom padding (where Google's logo sits) follows the sheet, but only changes once the
+    // sheet has settled and the camera is idle, so it never fights a gesture.
+    var padBottomPx by remember(controller) { mutableFloatStateOf(controller.halfPx) }
+    LaunchedEffect(controller) {
+        snapshotFlow { controller.heightPx to camera.isMoving }.collectLatest { (h, moving) ->
+            if (moving) return@collectLatest
+            delay(150)
+            padBottomPx = if (h <= controller.collapsedPx + 2f) controller.collapsedPx else controller.halfPx
+        }
+    }
+
     // Like Google Maps: touching the map tucks the sheet away.
     LaunchedEffect(camera.isMoving) {
         if (camera.isMoving && camera.cameraMoveStartedReason == CameraMoveStartedReason.GESTURE && !controller.isCollapsed()) {
@@ -230,7 +248,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
 
     val properties = remember(hasLocation) { MapProperties(isMyLocationEnabled = hasLocation) }
     val uiSettings = remember {
-        MapUiSettings(myLocationButtonEnabled = false, zoomControlsEnabled = false, mapToolbarEnabled = false)
+        MapUiSettings(myLocationButtonEnabled = false, zoomControlsEnabled = false, mapToolbarEnabled = false, compassEnabled = false)
     }
     val unmatched = places.count { it.lat == null }
     val rating = (details as? DetailsState.Loaded)?.details?.let { d -> d.rating?.let { it to (d.ratingCount ?: 0) } }
@@ -241,7 +259,8 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
             cameraPositionState = camera,
             properties = properties,
             uiSettings = uiSettings,
-            contentPadding = PaddingValues(bottom = with(density) { controller.halfPx.toDp() }),
+            contentPadding = PaddingValues(bottom = with(density) { padBottomPx.toDp() }),
+            mapColorScheme = ComposeMapColorScheme.FOLLOW_SYSTEM,
             onMapLoaded = { mapLoaded = true },
             onMapClick = { vm.select(null); focusManager.clearFocus(); typing = false; controller.collapse() },
         ) {
@@ -290,6 +309,11 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                 .padding(end = 16.dp, bottom = 16.dp),
             horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            CompassButton(camera) {
+                scope.launch {
+                    camera.animate(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder(camera.position).bearing(0f).tilt(0f).build()), 400)
+                }
+            }
             FloatingActionButton(
                 onClick = {
                     if (!hasLocation) askForLocation() else scope.launch {
@@ -344,6 +368,21 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
 
     if (sel != null && showDetails) {
         ModalBottomSheet(onDismissRequest = { showDetails = false }) { PlaceSheet(vm, sel) }
+    }
+}
+
+/** Appears only when the map is rotated or tilted; the arrow keeps pointing north. Tap to face north again. */
+@Composable
+private fun CompassButton(camera: CameraPositionState, onClick: () -> Unit) {
+    val turned by remember { derivedStateOf { abs(camera.position.bearing) > 0.5f || camera.position.tilt > 0.5f } }
+    AnimatedVisibility(turned, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut()) {
+        SmallFloatingActionButton(
+            onClick = onClick,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.primary,
+        ) {
+            Icon(Icons.Filled.Navigation, "Face north", Modifier.graphicsLayer { rotationZ = -camera.position.bearing })
+        }
     }
 }
 

@@ -37,7 +37,7 @@ class MarkerIcons(private val context: Context, private val colors: MarkerColors
     /** Pixel size of the label bitmap; used to avoid overlapping labels. Left edge sits on the badge center. */
     fun labelSize(text: String, selected: Boolean): Pair<Float, Float> {
         val paint = textPaint(selected)
-        val halo = 3f * d
+        val halo = 1.6f * d
         val width = badgeRadius(selected) + gap + paint.measureText(ellipsized(text, paint)) + halo * 2
         val height = paint.fontMetrics.let { it.descent - it.ascent } + halo * 2
         return width to height
@@ -74,7 +74,7 @@ class MarkerIcons(private val context: Context, private val colors: MarkerColors
         val x = badgeRadius(selected) + gap
         val y = h / 2f - (paint.fontMetrics.ascent + paint.fontMetrics.descent) / 2f
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 3f * d
+        paint.strokeWidth = 1.6f * d
         paint.strokeJoin = Paint.Join.ROUND
         paint.color = colors.halo
         c.drawText(shown, x, y, paint)
