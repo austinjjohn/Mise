@@ -39,6 +39,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val details: StateFlow<DetailsState> = _details
     private val detailsCache = HashMap<String, PlaceDetails>()
 
+    private val prefs = app.getSharedPreferences("mise", android.content.Context.MODE_PRIVATE)
+    private val _radius = MutableStateFlow(prefs.getInt("radius_miles", 10))
+    val radiusMiles: StateFlow<Int> = _radius
+    fun setRadius(miles: Int) {
+        _radius.value = miles
+        prefs.edit().putInt("radius_miles", miles).apply()
+    }
+
     private val _progress = MutableStateFlow(ImportProgress())
     val progress: StateFlow<ImportProgress> = _progress
 

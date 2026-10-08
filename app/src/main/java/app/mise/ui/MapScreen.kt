@@ -21,8 +21,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.SavedPlace
@@ -36,7 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
-private const val NEARBY_MILES = 10
+private val RADIUS_OPTIONS = listOf(1, 2, 5, 10, 15, 25, 50)
 private const val METERS_PER_MILE = 1609.34f
 
 /** A location picked from search; the nearby list centers on it. */
@@ -54,6 +56,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     val places by vm.places.collectAsStateWithLifecycle()
     val selected by vm.selected.collectAsStateWithLifecycle()
     val details by vm.details.collectAsStateWithLifecycle()
+    val radiusMiles by vm.radiusMiles.collectAsStateWithLifecycle()
 
     var hasLocation by remember { mutableStateOf(false) }
     var userLoc by remember { mutableStateOf<LatLng?>(null) }
@@ -63,6 +66,11 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var typing by remember { mutableStateOf(false) }
     var predictions by remember { mutableStateOf<List<app.mise.data.Suggestion>>(emptyList()) }
+
+    val sheetState = rememberStandardBottomSheetState(initialValue = SheetValue.PartiallyExpanded, skipHiddenState = true)
+    val scaffoldState = rememberBottomSheetScaffoldState(sheetState)
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val peek = screenHeight * 0.4f
 
     val camera = rememberCameraPositionState { position = CameraPosition.fromLatLngZoom(LatLng(39.5, -98.35), 4f) }
 
@@ -89,6 +97,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     fun pick(p: SavedPlace) {
         vm.select(p)
         showDetails = false
+        scope.launch { sheetState.partialExpand() }
         val lat = p.lat ?: return
         val lng = p.lng ?: return
         flyTo(LatLng(lat, lng), 15f)
@@ -135,11 +144,11 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
         area != null -> "Near ${area!!.name}"
         else -> "Near you"
     }
-    val rows = remember(places, center, sel?.id) {
+    val rows = remember(places, center, sel?.id, radiusMiles) {
         if (center == null) emptyList() else places
             .filter { it.lat != null && it.lng != null && it.id != sel?.id }
             .map { it to meters(center, it) }
-            .filter { it.second <= NEARBY_MILES * METERS_PER_MILE }
+            .filter { it.second <= radiusMiles * METERS_PER_MILE }
             .sortedBy { it.second }
     }
 
@@ -149,13 +158,29 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     }
     val unmatched = places.count { it.lat == null }
 
-    Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(0.6f).fillMaxWidth()) {
+    val rating = (details as? DetailsState.Loaded)?.details?.let { d -> d.rating?.let { it to (d.ratingCount ?: 0) } }
+
+    BottomSheetScaffold(
+        scaffoldState = scaffoldState,
+        sheetPeekHeight = peek,
+        sheetShape = RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp),
+        sheetContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        sheetContent = {
+            NearbyPanel(
+                maxListHeight = screenHeight,
+                title = title, focus = sel, rating = rating, hasCenter = center != null, rows = rows,
+                radiusMiles = radiusMiles, onRadius = vm::setRadius,
+                onPick = ::pick, onOpenDetails = { showDetails = true }, onClearFocus = { vm.select(null) },
+            )
+        },
+    ) {
+        Box(Modifier.fillMaxSize()) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = camera,
                 properties = properties,
                 uiSettings = uiSettings,
+                contentPadding = PaddingValues(bottom = peek),
                 onMapClick = { vm.select(null); focusManager.clearFocus(); typing = false },
             ) {
                 places.forEach { p ->
@@ -171,7 +196,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
                 LocationSearchField(query, onQuery = { query = it; typing = true }, onClear = ::clearSearch)
                 if (suggestionRows.isNotEmpty()) {
                     Surface(
-                        Modifier.padding(top = 6.dp), shape = RoundedCornerShape(20.dp), shadowElevation = 6.dp,
+                        Modifier.padding(top = 6.dp), shape = RoundedCornerShape(24.dp), shadowElevation = 6.dp,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
                         LazyColumn(Modifier.heightIn(max = 280.dp)) {
@@ -195,7 +220,10 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
                 }
             }
 
-            Column(Modifier.align(Alignment.BottomEnd).padding(16.dp), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = peek + 16.dp),
+                horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 FloatingActionButton(
                     onClick = {
                         if (!hasLocation) askForLocation() else scope.launch {
@@ -211,13 +239,6 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
                 )
             }
         }
-
-        val rating = (details as? DetailsState.Loaded)?.details?.let { d -> d.rating?.let { it to (d.ratingCount ?: 0) } }
-        NearbyPanel(
-            modifier = Modifier.weight(0.4f).fillMaxWidth(),
-            title = title, focus = sel, rating = rating, hasCenter = center != null, rows = rows,
-            onPick = ::pick, onOpenDetails = { showDetails = true }, onClearFocus = { vm.select(null) },
-        )
     }
 
     if (sel != null && showDetails) {
@@ -245,86 +266,92 @@ private fun LocationSearchField(query: String, onQuery: (String) -> Unit, onClea
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun NearbyPanel(
-    modifier: Modifier,
+    maxListHeight: Dp,
     title: String,
     focus: SavedPlace?,
     rating: Pair<Double, Int>?,
     hasCenter: Boolean,
     rows: List<Pair<SavedPlace, Float>>,
+    radiusMiles: Int,
+    onRadius: (Int) -> Unit,
     onPick: (SavedPlace) -> Unit,
     onOpenDetails: () -> Unit,
     onClearFocus: () -> Unit,
 ) {
-    Surface(
-        modifier = modifier,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp),
-    ) {
-        Column {
-            Box(
-                Modifier.align(Alignment.CenterHorizontally).padding(top = 10.dp)
-                    .size(width = 36.dp, height = 4.dp)
-                    .background(MaterialTheme.colorScheme.outlineVariant, CircleShape),
-            )
-            if (focus != null) {
-                Surface(
-                    onClick = onOpenDetails,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    shape = RoundedCornerShape(28.dp),
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
-                ) {
-                    Row(Modifier.padding(start = 20.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(focus.name, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1)
-                            val sub = listOfNotNull(rating?.let { "★ %.1f (%,d)".format(it.first, it.second) }, focus.cuisine).joinToString(" · ")
-                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        Button(onOpenDetails, shapes = ButtonDefaults.shapes()) { Text("Details") }
-                        IconButton(onClearFocus) { Icon(Icons.Filled.Close, "Close") }
-                    }
-                }
-            }
-            Row(Modifier.padding(start = 24.dp, end = 16.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, modifier = Modifier.weight(1f))
-                if (hasCenter) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
-                        Text(
-                            "${rows.size} within $NEARBY_MILES mi",
-                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        )
-                    }
-                }
-            }
-            val empty = when {
-                !hasCenter -> "Allow location, or search a city to see your spots near it."
-                rows.isEmpty() -> "None of your saved places are within $NEARBY_MILES miles."
-                else -> null
-            }
-            if (empty != null) {
-                Text(empty, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            LazyColumn(
-                contentPadding = PaddingValues(
-                    start = 12.dp, end = 12.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
-                ),
-                verticalArrangement = Arrangement.spacedBy(SegmentedGap),
+    Column(Modifier.fillMaxWidth()) {
+        if (focus != null) {
+            Surface(
+                onClick = onOpenDetails,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                shape = RoundedCornerShape(28.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp),
             ) {
-                itemsIndexed(rows, key = { _, r -> r.first.id }) { i, (p, dist) ->
-                    SegmentedItem(
-                        index = i, count = rows.size, onClick = { onPick(p) },
-                        leading = {
-                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.size(44.dp)) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.Restaurant, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
-                                }
-                            }
-                        },
-                        supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
-                    ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
+                Row(Modifier.padding(start = 20.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(focus.name, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1)
+                        val sub = listOfNotNull(rating?.let { "★ %.1f (%,d)".format(it.first, it.second) }, focus.cuisine).joinToString(" · ")
+                        if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Button(onOpenDetails, shapes = ButtonDefaults.shapes()) { Text("Details") }
+                    IconButton(onClearFocus) { Icon(Icons.Filled.Close, "Close") }
                 }
+            }
+        }
+        Row(Modifier.padding(start = 24.dp, end = 16.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, modifier = Modifier.weight(1f))
+            if (hasCenter) {
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    Surface(onClick = { menuOpen = true }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Row(Modifier.padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "${rows.size} within $radiusMiles mi",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                            Icon(Icons.Filled.ArrowDropDown, "Change radius", tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                        }
+                    }
+                    DropdownMenu(menuOpen, { menuOpen = false }) {
+                        RADIUS_OPTIONS.forEach { miles ->
+                            DropdownMenuItem(
+                                text = { Text("$miles mi") },
+                                leadingIcon = { if (miles == radiusMiles) Icon(Icons.Filled.Check, null) },
+                                onClick = { onRadius(miles); menuOpen = false },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        val empty = when {
+            !hasCenter -> "Allow location, or search a city to see your spots near it."
+            rows.isEmpty() -> "None of your saved places are within $radiusMiles miles."
+            else -> null
+        }
+        if (empty != null) {
+            Text(empty, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().heightIn(max = maxListHeight),
+            contentPadding = PaddingValues(
+                start = 12.dp, end = 12.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(SegmentedGap),
+        ) {
+            itemsIndexed(rows, key = { _, r -> r.first.id }) { i, (p, dist) ->
+                SegmentedItem(
+                    index = i, count = rows.size, onClick = { onPick(p) },
+                    leading = {
+                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.size(44.dp)) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Filled.Restaurant, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                            }
+                        }
+                    },
+                    supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
+                ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
             }
         }
     }
