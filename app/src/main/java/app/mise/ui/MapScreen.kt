@@ -2,15 +2,19 @@ package app.mise.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.graphics.RectF
 import android.location.Location
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -20,11 +24,13 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.SavedPlace
@@ -35,22 +41,37 @@ import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlin.math.hypot
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 private val RADIUS_OPTIONS = listOf(1, 2, 5, 10, 15, 25, 50)
 private const val METERS_PER_MILE = 1609.34f
+
+/** Labels appear once the map is zoomed in at least this far (they are also decluttered). */
+private const val LABEL_MIN_ZOOM = 11.5f
 
 /** A location picked from search; the nearby list centers on it. */
 private data class Area(val name: String, val latLng: LatLng)
 
 private data class SuggestionRow(val title: String, val subtitle: String?, val saved: Boolean, val onClick: () -> Unit)
 
+@Composable
+fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        MapContent(vm, onOpenAdd, constraints.maxWidth.toFloat(), constraints.maxHeight.toFloat())
+    }
+}
+
 @SuppressLint("MissingPermission") // guarded by hasLocation
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
+private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float, heightPx: Float) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val places by vm.places.collectAsStateWithLifecycle()
@@ -67,13 +88,33 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     var typing by remember { mutableStateOf(false) }
     var predictions by remember { mutableStateOf<List<app.mise.data.Suggestion>>(emptyList()) }
 
-    val sheetState = rememberStandardBottomSheetState(initialValue = SheetValue.PartiallyExpanded, skipHiddenState = true)
-    val scaffoldState = rememberBottomSheetScaffoldState(sheetState)
-    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
-    val peek = screenHeight * 0.4f
-
     val camera = rememberCameraPositionState { position = CameraPosition.fromLatLngZoom(LatLng(39.5, -98.35), 4f) }
+    val listState = rememberLazyListState()
 
+    // --- bottom sheet: collapsed / one-third / nearly full, with Expressive spring motion -------
+    val sel = selected
+    val spatialSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+    val latestSpec by rememberUpdatedState(spatialSpec)
+    val topInset = WindowInsets.statusBars.getTop(density).toFloat()
+    val bottomInset = WindowInsets.navigationBars.getBottom(density).toFloat()
+    val collapsedBase = with(density) { 68.dp.toPx() } + bottomInset
+    val controller = remember(heightPx) {
+        SheetController(
+            scope = scope, spec = { latestSpec },
+            halfPx = heightPx * 0.4f,
+            fullPx = heightPx - topInset - with(density) { 76.dp.toPx() },
+            collapsed = collapsedBase,
+        )
+    }
+    // A selected place adds a card to the header, so the collapsed height grows to show it.
+    LaunchedEffect(sel != null, collapsedBase) {
+        val wasCollapsed = controller.isCollapsed()
+        controller.collapsedPx = collapsedBase + if (sel != null) with(density) { 84.dp.toPx() } else 0f
+        if (wasCollapsed) controller.collapse()
+    }
+    val aboveHalf by remember(controller) { derivedStateOf { controller.heightPx > controller.halfPx + 1f } }
+
+    // --- location -------------------------------------------------------------------------------
     suspend fun fetchLocation(): LatLng? {
         val client = LocationServices.getFusedLocationProviderClient(context)
         val loc = runCatching { client.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, null).await() }.getOrNull()
@@ -97,7 +138,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     fun pick(p: SavedPlace) {
         vm.select(p)
         showDetails = false
-        scope.launch { sheetState.partialExpand() }
+        controller.half()
         val lat = p.lat ?: return
         val lng = p.lng ?: return
         flyTo(LatLng(lat, lng), 15f)
@@ -108,7 +149,23 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
         focusManager.clearFocus()
     }
 
-    // Autocomplete: wait for a pause in typing, bias results toward where the user is looking.
+    // Like Google Maps: touching the map tucks the sheet away.
+    LaunchedEffect(camera.isMoving) {
+        if (camera.isMoving && camera.cameraMoveStartedReason == CameraMoveStartedReason.GESTURE && !controller.isCollapsed()) {
+            controller.collapse()
+        }
+    }
+
+    // Back gesture peels one layer at a time: expanded sheet, then selection, then search.
+    BackHandler(enabled = aboveHalf || sel != null || area != null || query.isNotEmpty()) {
+        when {
+            aboveHalf -> controller.half()
+            sel != null -> vm.select(null)
+            else -> clearSearch()
+        }
+    }
+
+    // --- search suggestions ---------------------------------------------------------------------
     LaunchedEffect(query, typing) {
         if (!typing || query.trim().length < 2) { predictions = emptyList(); return@LaunchedEffect }
         delay(250)
@@ -128,6 +185,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
                     val (name, ll) = vm.locate(s.placeId) ?: return@launch
                     vm.select(null)
                     area = Area(name.ifBlank { s.primary }, ll)
+                    controller.half()
                     flyTo(ll, 12f)
                 }
             }
@@ -135,8 +193,7 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
         mine + google
     }
 
-    // What the nearby list is centered on: the selected restaurant, else the searched area, else you.
-    val sel = selected
+    // --- what the nearby list is centered on ------------------------------------------------------
     val selLatLng = sel?.let { p -> p.lat?.let { LatLng(it, p.lng!!) } }
     val center = selLatLng ?: area?.latLng ?: userLoc
     val title = when {
@@ -151,92 +208,136 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
             .filter { it.second <= radiusMiles * METERS_PER_MILE }
             .sortedBy { it.second }
     }
+    LaunchedEffect(sel?.id, area) { listState.scrollToItem(0) }
+
+    // --- map markers + zoom-aware labels --------------------------------------------------------
+    val cs = MaterialTheme.colorScheme
+    val icons = remember(context, cs.tertiary, cs.primary, cs.onSurface, cs.surface) {
+        MarkerIcons(
+            context,
+            MarkerColors(cs.tertiary.toArgb(), cs.onTertiary.toArgb(), cs.primary.toArgb(), cs.onPrimary.toArgb(), cs.onSurface.toArgb(), cs.surface.toArgb()),
+        )
+    }
+    var labelIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var mapLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(places, sel?.id, icons, mapLoaded) {
+        if (!mapLoaded) return@LaunchedEffect
+        snapshotFlow { camera.position }.collectLatest {
+            delay(80)
+            labelIds = chooseLabels(places, camera, icons, sel?.id, widthPx, heightPx)
+        }
+    }
 
     val properties = remember(hasLocation) { MapProperties(isMyLocationEnabled = hasLocation) }
     val uiSettings = remember {
         MapUiSettings(myLocationButtonEnabled = false, zoomControlsEnabled = false, mapToolbarEnabled = false)
     }
     val unmatched = places.count { it.lat == null }
-
     val rating = (details as? DetailsState.Loaded)?.details?.let { d -> d.rating?.let { it to (d.ratingCount ?: 0) } }
 
-    BottomSheetScaffold(
-        scaffoldState = scaffoldState,
-        sheetPeekHeight = peek,
-        sheetShape = RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp),
-        sheetContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        sheetContent = {
-            NearbyPanel(
-                maxListHeight = screenHeight,
-                title = title, focus = sel, rating = rating, hasCenter = center != null, rows = rows,
-                radiusMiles = radiusMiles, onRadius = vm::setRadius,
-                onPick = ::pick, onOpenDetails = { showDetails = true }, onClearFocus = { vm.select(null) },
-            )
-        },
-    ) {
-        Box(Modifier.fillMaxSize()) {
-            GoogleMap(
-                modifier = Modifier.fillMaxSize(),
-                cameraPositionState = camera,
-                properties = properties,
-                uiSettings = uiSettings,
-                contentPadding = PaddingValues(bottom = peek),
-                onMapClick = { vm.select(null); focusManager.clearFocus(); typing = false },
-            ) {
-                places.forEach { p ->
-                    val lat = p.lat ?: return@forEach
-                    val lng = p.lng ?: return@forEach
-                    key(p.id) {
-                        Marker(state = remember { MarkerState(LatLng(lat, lng)) }, title = p.name, onClick = { pick(p); true })
-                    }
+    Box(Modifier.fillMaxSize()) {
+        GoogleMap(
+            modifier = Modifier.fillMaxSize(),
+            cameraPositionState = camera,
+            properties = properties,
+            uiSettings = uiSettings,
+            contentPadding = PaddingValues(bottom = with(density) { controller.halfPx.toDp() }),
+            onMapLoaded = { mapLoaded = true },
+            onMapClick = { vm.select(null); focusManager.clearFocus(); typing = false; controller.collapse() },
+        ) {
+            places.forEach { p ->
+                val lat = p.lat ?: return@forEach
+                val lng = p.lng ?: return@forEach
+                key(p.id, lat, lng) {
+                    val isSel = p.id == sel?.id
+                    PlaceMarker(p, LatLng(lat, lng), isSel, isSel || p.id in labelIds, icons) { pick(p) }
                 }
             }
+        }
 
-            Column(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                LocationSearchField(query, onQuery = { query = it; typing = true }, onClear = ::clearSearch)
-                if (suggestionRows.isNotEmpty()) {
-                    Surface(
-                        Modifier.padding(top = 6.dp), shape = RoundedCornerShape(24.dp), shadowElevation = 6.dp,
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    ) {
-                        LazyColumn(Modifier.heightIn(max = 280.dp)) {
-                            items(suggestionRows) { r ->
-                                ListItem(
-                                    headlineContent = { Text(r.title, maxLines = 1) },
-                                    supportingContent = r.subtitle?.takeIf { it.isNotBlank() }?.let { { Text(it, maxLines = 1) } },
-                                    leadingContent = { Icon(if (r.saved) Icons.Filled.Restaurant else Icons.Filled.Place, null) },
-                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                                    modifier = Modifier.clickable(onClick = r.onClick),
-                                )
-                            }
+        Column(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            LocationSearchField(query, onQuery = { query = it; typing = true }, onClear = ::clearSearch)
+            if (suggestionRows.isNotEmpty()) {
+                Surface(
+                    Modifier.padding(top = 6.dp), shape = RoundedCornerShape(24.dp), shadowElevation = 6.dp,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                ) {
+                    LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                        items(suggestionRows) { r ->
+                            ListItem(
+                                headlineContent = { Text(r.title, maxLines = 1) },
+                                supportingContent = r.subtitle?.takeIf { it.isNotBlank() }?.let { { Text(it, maxLines = 1) } },
+                                leadingContent = { Icon(if (r.saved) Icons.Filled.Restaurant else Icons.Filled.Place, null) },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                modifier = Modifier.clickable(onClick = r.onClick),
+                            )
                         }
                     }
-                } else if (unmatched > 0) {
-                    AssistChip(
-                        onClick = vm::retryUnmatched,
-                        label = { Text("$unmatched not on map — tap to retry") },
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
                 }
-            }
-
-            Column(
-                Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = peek + 16.dp),
-                horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                FloatingActionButton(
-                    onClick = {
-                        if (!hasLocation) askForLocation() else scope.launch {
-                            clearSearch(); vm.select(null)
-                            (fetchLocation() ?: userLoc)?.let { camera.animate(CameraUpdateFactory.newLatLngZoom(it, 13f), 600) }
-                        }
-                    },
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                ) { Icon(Icons.Filled.MyLocation, "Back to my location") }
-                ExtendedFloatingActionButton(
-                    onClick = onOpenAdd, icon = { Icon(Icons.Filled.Add, null) }, text = { Text("Add place") },
+            } else if (unmatched > 0) {
+                AssistChip(
+                    onClick = vm::retryUnmatched,
+                    label = { Text("$unmatched not on map — tap to retry") },
+                    modifier = Modifier.padding(top = 6.dp),
                 )
+            }
+        }
+
+        // Buttons ride on top of the sheet until it reaches its one-third height, then stay put behind it.
+        Column(
+            Modifier.align(Alignment.BottomEnd)
+                .offset { IntOffset(0, -min(controller.heightPx, controller.halfPx).roundToInt()) }
+                .padding(end = 16.dp, bottom = 16.dp),
+            horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            FloatingActionButton(
+                onClick = {
+                    if (!hasLocation) askForLocation() else scope.launch {
+                        clearSearch(); vm.select(null)
+                        (fetchLocation() ?: userLoc)?.let { camera.animate(CameraUpdateFactory.newLatLngZoom(it, 13f), 600) }
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.primary,
+            ) { Icon(Icons.Filled.MyLocation, "Back to my location") }
+            ExtendedFloatingActionButton(
+                onClick = onOpenAdd, icon = { Icon(Icons.Filled.Add, null) }, text = { Text("Add place") },
+            )
+        }
+
+        ResizableSheet(controller, listState, Modifier.align(Alignment.BottomCenter)) { drag ->
+            NearbyHeader(
+                dragModifier = drag, title = title, focus = sel, rating = rating, hasCenter = center != null,
+                count = rows.size, radiusMiles = radiusMiles, onRadius = vm::setRadius,
+                onOpenDetails = { showDetails = true }, onClearFocus = { vm.select(null) },
+            )
+            val empty = when {
+                center == null -> "Allow location, or search a city to see your spots near it."
+                rows.isEmpty() -> "None of your saved places are within $radiusMiles miles."
+                else -> null
+            }
+            if (empty != null) {
+                Text(empty, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = with(density) { bottomInset.toDp() } + 8.dp),
+                verticalArrangement = Arrangement.spacedBy(SegmentedGap),
+            ) {
+                itemsIndexed(rows, key = { _, r -> r.first.id }) { i, (p, dist) ->
+                    SegmentedItem(
+                        index = i, count = rows.size, onClick = { pick(p) },
+                        leading = {
+                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.size(44.dp)) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Restaurant, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                                }
+                            }
+                        },
+                        supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
+                    ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
+                }
             }
         }
     }
@@ -244,6 +345,61 @@ fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
     if (sel != null && showDetails) {
         ModalBottomSheet(onDismissRequest = { showDetails = false }) { PlaceSheet(vm, sel) }
     }
+}
+
+/** Badge marker plus a name label that fades in and out as zoom and overlap allow. */
+@Composable
+@GoogleMapComposable
+private fun PlaceMarker(p: SavedPlace, pos: LatLng, selected: Boolean, showLabel: Boolean, icons: MarkerIcons, onClick: () -> Unit) {
+    Marker(
+        state = remember { MarkerState(pos) },
+        icon = remember(selected, icons) { icons.badge(selected) },
+        anchor = Offset(0.5f, 0.5f),
+        zIndex = if (selected) 3f else 2f,
+        onClick = { onClick(); true },
+    )
+    val alpha by animateFloatAsState(if (showLabel) 1f else 0f, tween(220), label = "label")
+    if (alpha > 0.01f) {
+        Marker(
+            state = remember { MarkerState(pos) },
+            icon = remember(p.name, selected, icons) { icons.label(p.name, selected) },
+            anchor = Offset(0f, 0.5f), // label bitmap's left edge sits on the badge center
+            alpha = alpha,
+            zIndex = 1f,
+            onClick = { onClick(); true },
+        )
+    }
+}
+
+/**
+ * Picks which places get a name label: nearest to the middle of the map first, skipping any label
+ * that would overlap another label or marker, like Google Maps. Nothing is labeled when zoomed out.
+ */
+private fun chooseLabels(
+    places: List<SavedPlace>, camera: CameraPositionState, icons: MarkerIcons, selectedId: Long?, w: Float, h: Float,
+): Set<Long> {
+    val proj = camera.projection ?: return emptySet()
+    if (camera.position.zoom < LABEL_MIN_ZOOM && selectedId == null) return emptySet()
+    class Item(val id: Long, val name: String, val x: Float, val y: Float, val r: Float)
+
+    val items = places.mapNotNull { p ->
+        val pt = proj.toScreenLocation(LatLng(p.lat ?: return@mapNotNull null, p.lng ?: return@mapNotNull null))
+        if (pt.x < -60 || pt.y < -60 || pt.x > w + 60 || pt.y > h + 60) null
+        else Item(p.id, p.name, pt.x.toFloat(), pt.y.toFloat(), icons.badgeRadius(p.id == selectedId))
+    }
+    val mid = proj.toScreenLocation(camera.position.target)
+    val ordered = items.sortedBy { if (it.id == selectedId) -1.0 else hypot((it.x - mid.x).toDouble(), (it.y - mid.y).toDouble()) }
+    val badges = items.associate { it.id to RectF(it.x - it.r, it.y - it.r, it.x + it.r, it.y + it.r) }
+    val labels = mutableListOf<RectF>()
+    val shown = mutableSetOf<Long>()
+    for (it in ordered) {
+        if (it.id != selectedId && camera.position.zoom < LABEL_MIN_ZOOM) continue
+        val (lw, lh) = icons.labelSize(it.name, it.id == selectedId)
+        val rect = RectF(it.x + it.r, it.y - lh / 2, it.x + lw, it.y + lh / 2)
+        val clash = badges.any { (id, b) -> id != it.id && RectF.intersects(rect, b) } || labels.any { l -> RectF.intersects(rect, l) }
+        if (!clash || it.id == selectedId) { shown += it.id; labels += rect }
+    }
+    return shown
 }
 
 @Composable
@@ -263,22 +419,22 @@ private fun LocationSearchField(query: String, onQuery: (String) -> Unit, onClea
     }
 }
 
+/** Top of the sheet: the selected-place card (if any) and the title with the radius picker. Draggable. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun NearbyPanel(
-    maxListHeight: Dp,
+private fun NearbyHeader(
+    dragModifier: Modifier,
     title: String,
     focus: SavedPlace?,
     rating: Pair<Double, Int>?,
     hasCenter: Boolean,
-    rows: List<Pair<SavedPlace, Float>>,
+    count: Int,
     radiusMiles: Int,
     onRadius: (Int) -> Unit,
-    onPick: (SavedPlace) -> Unit,
     onOpenDetails: () -> Unit,
     onClearFocus: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth()) {
+    Column(dragModifier) {
         if (focus != null) {
             Surface(
                 onClick = onOpenDetails,
@@ -306,7 +462,7 @@ private fun NearbyPanel(
                     Surface(onClick = { menuOpen = true }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
                         Row(Modifier.padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "${rows.size} within $radiusMiles mi",
+                                "$count within $radiusMiles mi",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                             )
@@ -323,35 +479,6 @@ private fun NearbyPanel(
                         }
                     }
                 }
-            }
-        }
-        val empty = when {
-            !hasCenter -> "Allow location, or search a city to see your spots near it."
-            rows.isEmpty() -> "None of your saved places are within $radiusMiles miles."
-            else -> null
-        }
-        if (empty != null) {
-            Text(empty, Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().heightIn(max = maxListHeight),
-            contentPadding = PaddingValues(
-                start = 12.dp, end = 12.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(SegmentedGap),
-        ) {
-            itemsIndexed(rows, key = { _, r -> r.first.id }) { i, (p, dist) ->
-                SegmentedItem(
-                    index = i, count = rows.size, onClick = { onPick(p) },
-                    leading = {
-                        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.size(44.dp)) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Filled.Restaurant, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
-                            }
-                        }
-                    },
-                    supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
-                ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
             }
         }
     }
