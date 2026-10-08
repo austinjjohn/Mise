@@ -2,7 +2,6 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
@@ -15,7 +14,7 @@ val mapsKey: String = localProps.getProperty("MAPS_API_KEY", "")
 
 android {
     namespace = "app.mise"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.mise"
@@ -46,10 +45,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-}
-
-kotlin {
-    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
 dependencies {
