@@ -36,6 +36,9 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -45,6 +48,7 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
 import com.google.maps.android.compose.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -64,7 +68,9 @@ private const val LABEL_MIN_ZOOM = 11.5f
 /** A location picked from search; the nearby list centers on it. */
 private data class Area(val name: String, val latLng: LatLng)
 
-private data class SuggestionRow(val title: String, val subtitle: String?, val saved: Boolean, val onClick: () -> Unit)
+private enum class RowKind { Filter, Saved, Place }
+
+private data class SuggestionRow(val title: String, val subtitle: String?, val kind: RowKind, val onClick: () -> Unit)
 
 @Composable
 fun MapScreen(vm: MainViewModel, onOpenAdd: () -> Unit) {
@@ -85,10 +91,12 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
     val selected by vm.selected.collectAsStateWithLifecycle()
     val details by vm.details.collectAsStateWithLifecycle()
     val radiusMiles by vm.radiusMiles.collectAsStateWithLifecycle()
+    val dishes by vm.dishesByPlace.collectAsStateWithLifecycle()
 
     var hasLocation by remember { mutableStateOf(false) }
     var userLoc by remember { mutableStateOf<LatLng?>(null) }
     var area by remember { mutableStateOf<Area?>(null) }
+    var filter by remember { mutableStateOf<String?>(null) }
     var showDetails by rememberSaveable { mutableStateOf(false) }
 
     var query by rememberSaveable { mutableStateOf("") }
@@ -152,7 +160,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
     }
 
     fun clearSearch() {
-        query = ""; typing = false; predictions = emptyList(); area = null
+        query = ""; typing = false; predictions = emptyList(); area = null; filter = null
         focusManager.clearFocus()
     }
 
@@ -190,43 +198,72 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
         predictions = vm.suggest(query.trim(), area?.latLng ?: userLoc)
     }
 
+    fun applyFilter(q: String) {
+        val text = q.trim()
+        if (text.isEmpty()) return
+        filter = text; query = text; typing = false; predictions = emptyList(); area = null
+        focusManager.clearFocus()
+        vm.select(null)
+        controller.half()
+        val hits = places.filter { it.lat != null && it.lng != null && searchReason(it, dishes[it.id].orEmpty(), text) != null }
+        when {
+            hits.size == 1 -> flyTo(LatLng(hits[0].lat!!, hits[0].lng!!), 14f)
+            hits.size > 1 -> scope.launch {
+                val bounds = LatLngBounds.Builder().apply { hits.forEach { include(LatLng(it.lat!!, it.lng!!)) } }.build()
+                runCatching { camera.animate(CameraUpdateFactory.newLatLngBounds(bounds, with(density) { 64.dp.roundToPx() }), 700) }
+            }
+        }
+    }
+
     val suggestionRows: List<SuggestionRow> = if (!typing) emptyList() else {
-        val mine = places.filter { it.name.contains(query.trim(), ignoreCase = true) }.take(3).map { p ->
-            SuggestionRow(p.name, listOfNotNull(p.cuisine, p.city.ifBlank { null }).joinToString(" · "), saved = true) {
-                typing = false; query = p.name; focusManager.clearFocus(); area = null; pick(p)
+        val q = query.trim()
+        val hits = places.mapNotNull { p -> searchReason(p, dishes[p.id].orEmpty(), q)?.let { p to it } }
+        val showAll = if (hits.size > 1) {
+            listOf(SuggestionRow("Show all ${hits.size} places matching “$q”", null, RowKind.Filter) { applyFilter(q) })
+        } else emptyList()
+        val mine = hits.take(4).map { (p, reason) ->
+            SuggestionRow(p.name, reason.ifBlank { listOfNotNull(p.cuisine, p.city.ifBlank { null }).joinToString(" · ") }, RowKind.Saved) {
+                typing = false; query = p.name; focusManager.clearFocus(); area = null; filter = null; pick(p)
             }
         }
         val google = predictions.map { s ->
-            SuggestionRow(s.primary, s.secondary, saved = false) {
+            SuggestionRow(s.primary, s.secondary, RowKind.Place) {
                 typing = false; query = s.primary; predictions = emptyList(); focusManager.clearFocus()
                 scope.launch {
                     val (name, ll) = vm.locate(s.placeId) ?: return@launch
                     vm.select(null)
+                    filter = null
                     area = Area(name.ifBlank { s.primary }, ll)
                     controller.half()
                     flyTo(ll, 12f)
                 }
             }
         }
-        mine + google
+        showAll + mine + google
     }
 
     // --- what the nearby list is centered on ------------------------------------------------------
     val selLatLng = sel?.let { p -> p.lat?.let { LatLng(it, p.lng!!) } }
     val center = selLatLng ?: area?.latLng ?: userLoc
+    val activeFilter = filter
     val title = when {
+        activeFilter != null && sel != null -> "More “$activeFilter”"
+        activeFilter != null -> "“$activeFilter”"
         sel != null -> "Also near ${sel.name}"
         area != null -> "Near ${area!!.name}"
         else -> "Near you"
     }
-    val rows = remember(places, center, sel?.id, radiusMiles) {
-        if (center == null) emptyList() else places
-            .filter { it.lat != null && it.lng != null && it.id != sel?.id }
-            .map { it to meters(center, it) }
-            .filter { it.second <= radiusMiles * METERS_PER_MILE }
+    val matchedIds = remember(places, dishes, activeFilter) {
+        if (activeFilter == null) null
+        else places.filter { searchReason(it, dishes[it.id].orEmpty(), activeFilter) != null }.map { it.id }.toSet()
+    }
+    val rows = remember(places, center, sel?.id, radiusMiles, matchedIds) {
+        places.filter { it.lat != null && it.lng != null && it.id != sel?.id && (matchedIds == null || it.id in matchedIds) }
+            .map { it to (center?.let { c -> meters(c, it) } ?: 0f) }
+            .filter { matchedIds != null || (center != null && it.second <= radiusMiles * METERS_PER_MILE) }
             .sortedBy { it.second }
     }
-    LaunchedEffect(sel?.id, area) { listState.scrollToItem(0) }
+    LaunchedEffect(sel?.id, area, filter) { listState.scrollToItem(0) }
 
     // --- map markers + zoom-aware labels --------------------------------------------------------
     val cs = MaterialTheme.colorScheme
@@ -236,13 +273,14 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
             MarkerColors(cs.tertiary.toArgb(), cs.onTertiary.toArgb(), cs.primary.toArgb(), cs.onPrimary.toArgb(), cs.onSurface.toArgb(), cs.surface.toArgb()),
         )
     }
+    val shownPlaces = remember(places, matchedIds) { if (matchedIds == null) places else places.filter { it.id in matchedIds } }
     var labelIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var mapLoaded by remember { mutableStateOf(false) }
-    LaunchedEffect(places, sel?.id, icons, mapLoaded) {
+    LaunchedEffect(shownPlaces, sel?.id, icons, mapLoaded) {
         if (!mapLoaded) return@LaunchedEffect
         snapshotFlow { camera.position }.collectLatest {
             delay(80)
-            labelIds = chooseLabels(places, camera, icons, sel?.id, widthPx, heightPx)
+            labelIds = chooseLabels(shownPlaces, camera, icons, sel?.id, widthPx, heightPx)
         }
     }
 
@@ -254,6 +292,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
     val rating = (details as? DetailsState.Loaded)?.details?.let { d -> d.rating?.let { it to (d.ratingCount ?: 0) } }
 
     Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().momentumZoom(camera, scope)) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = camera,
@@ -264,7 +303,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
             onMapLoaded = { mapLoaded = true },
             onMapClick = { vm.select(null); focusManager.clearFocus(); typing = false; controller.collapse() },
         ) {
-            places.forEach { p ->
+            shownPlaces.forEach { p ->
                 val lat = p.lat ?: return@forEach
                 val lng = p.lng ?: return@forEach
                 key(p.id, lat, lng) {
@@ -273,9 +312,10 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                 }
             }
         }
+        }
 
         Column(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
-            LocationSearchField(query, onQuery = { query = it; typing = true }, onClear = ::clearSearch)
+            LocationSearchField(query, onQuery = { query = it; typing = true }, onClear = ::clearSearch, onSearch = { applyFilter(query) })
             if (suggestionRows.isNotEmpty()) {
                 Surface(
                     Modifier.padding(top = 6.dp), shape = RoundedCornerShape(24.dp), shadowElevation = 6.dp,
@@ -286,7 +326,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                             ListItem(
                                 headlineContent = { Text(r.title, maxLines = 1) },
                                 supportingContent = r.subtitle?.takeIf { it.isNotBlank() }?.let { { Text(it, maxLines = 1) } },
-                                leadingContent = { Icon(if (r.saved) Icons.Filled.Restaurant else Icons.Filled.Place, null) },
+                                leadingContent = { Icon(when (r.kind) { RowKind.Filter -> Icons.Filled.FilterList; RowKind.Saved -> Icons.Filled.Restaurant; RowKind.Place -> Icons.Filled.Place }, null) },
                                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                                 modifier = Modifier.clickable(onClick = r.onClick),
                             )
@@ -332,11 +372,12 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
         ResizableSheet(controller, listState, Modifier.align(Alignment.BottomCenter)) { drag ->
             NearbyHeader(
                 dragModifier = drag, title = title, focus = sel, rating = rating, hasCenter = center != null,
-                count = rows.size, radiusMiles = radiusMiles, onRadius = vm::setRadius,
+                count = rows.size, filtered = filter != null, radiusMiles = radiusMiles, onRadius = vm::setRadius,
                 onOpenDetails = { showDetails = true }, onClearFocus = { vm.select(null) },
             )
             val empty = when {
-                center == null -> "Allow location, or search a city to see your spots near it."
+                filter != null && rows.isEmpty() -> "No saved places match “$filter”."
+                center == null && filter == null -> "Allow location, or search a city to see your spots near it."
                 rows.isEmpty() -> "None of your saved places are within $radiusMiles miles."
                 else -> null
             }
@@ -359,7 +400,15 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                                 }
                             }
                         },
-                        supporting = { Text(listOfNotNull(p.cuisine, miles(dist)).joinToString(" · ")) },
+                        supporting = {
+                            val reason = activeFilter?.let { searchReason(p, dishes[p.id].orEmpty(), it) }?.ifBlank { null }
+                            Text(
+                                listOfNotNull(
+                                    reason, p.cuisine?.takeIf { reason?.startsWith("Cuisine") != true },
+                                    if (center != null) miles(dist) else null,
+                                ).joinToString(" · "),
+                            )
+                        },
                     ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
                 }
             }
@@ -442,11 +491,13 @@ private fun chooseLabels(
 }
 
 @Composable
-private fun LocationSearchField(query: String, onQuery: (String) -> Unit, onClear: () -> Unit) {
+private fun LocationSearchField(query: String, onQuery: (String) -> Unit, onClear: () -> Unit, onSearch: () -> Unit) {
     Surface(shape = CircleShape, shadowElevation = 6.dp, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
         TextField(
             value = query, onValueChange = onQuery, singleLine = true,
-            placeholder = { Text("Search a city or place") },
+            placeholder = { Text("Search places, dishes, cuisines, or a city") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
             leadingIcon = { Icon(Icons.Filled.Search, null) },
             trailingIcon = if (query.isNotEmpty()) ({ IconButton(onClear) { Icon(Icons.Filled.Close, "Clear") } }) else null,
             colors = TextFieldDefaults.colors(
@@ -468,6 +519,7 @@ private fun NearbyHeader(
     rating: Pair<Double, Int>?,
     hasCenter: Boolean,
     count: Int,
+    filtered: Boolean,
     radiusMiles: Int,
     onRadius: (Int) -> Unit,
     onOpenDetails: () -> Unit,
@@ -495,7 +547,14 @@ private fun NearbyHeader(
         }
         Row(Modifier.padding(start = 24.dp, end = 16.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, modifier = Modifier.weight(1f))
-            if (hasCenter) {
+            if (filtered) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Text(
+                        "$count results", Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
+            } else if (hasCenter) {
                 var menuOpen by remember { mutableStateOf(false) }
                 Box {
                     Surface(onClick = { menuOpen = true }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {

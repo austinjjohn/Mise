@@ -18,6 +18,8 @@ data class SavedPlace(
     val address: String? = null,
     val cuisine: String? = null,
     val notes: String? = null,
+    /** True once we've asked Google for this place's type, so auto-filled cuisine is only tried once. */
+    val typeChecked: Boolean = false,
 )
 
 /** One bullet in a place's list: a dish tried (tried = true) or wanted (tried = false). */
@@ -43,6 +45,12 @@ interface PlaceDao {
     @Query("SELECT COUNT(*) FROM SavedPlace WHERE LOWER(name) = LOWER(:name) AND LOWER(city) = LOWER(:city)")
     suspend fun countDuplicates(name: String, city: String): Int
 
+    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId IS NOT NULL AND typeChecked = 0")
+    suspend fun needsType(): List<SavedPlace>
+
+    @Query("SELECT * FROM DishNote")
+    fun observeAllDishes(): Flow<List<DishNote>>
+
     @Insert suspend fun insert(place: SavedPlace): Long
     @Update suspend fun update(place: SavedPlace)
     @Delete suspend fun delete(place: SavedPlace)
@@ -55,7 +63,7 @@ interface PlaceDao {
     @Delete suspend fun deleteNote(note: DishNote)
 }
 
-@Database(entities = [SavedPlace::class, DishNote::class], version = 2, exportSchema = false)
+@Database(entities = [SavedPlace::class, DishNote::class], version = 3, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): PlaceDao
 
@@ -68,9 +76,15 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN typeChecked INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "mise.db")
-                .addMigrations(MIGRATION_1_2).build().also { instance = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
     }
 }

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import app.mise.data.*
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -25,6 +26,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val places: StateFlow<List<SavedPlace>> =
         dao.observePlaces().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Every dish bullet by place, so search can match dishes without opening each place. */
+    val dishesByPlace: StateFlow<Map<Long, List<String>>> =
+        dao.observeAllDishes().map { all -> all.groupBy({ it.placeId }, { it.text }) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    init {
+        viewModelScope.launch { backfillCuisines() }
+    }
+
+    /** Fills blank cuisines from Google's place type, once per place. Network failures are retried next launch. */
+    private suspend fun backfillCuisines() {
+        for (p in dao.needsType()) {
+            val result = runCatching { repo.cuisine(p.googlePlaceId!!) }
+            if (result.isFailure) continue
+            dao.update(p.copy(cuisine = p.cuisine ?: result.getOrNull(), typeChecked = true))
+            delay(150)
+        }
+    }
 
     private val selectedId = MutableStateFlow<Long?>(null)
     val selected: StateFlow<SavedPlace?> =
@@ -115,7 +135,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 googlePlaceId = match?.placeId,
                 lat = match?.latLng?.latitude, lng = match?.latLng?.longitude,
                 address = match?.address,
-                cuisine = cuisine?.trim()?.ifBlank { null },
+                cuisine = cuisine?.trim()?.ifBlank { null } ?: match?.cuisine,
+                typeChecked = match != null,
                 notes = notes?.trim()?.ifBlank { null },
             )
         )
@@ -163,7 +184,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             dao.unmatched().forEach { p ->
                 val m = runCatching { repo.match(p.name, p.city) }.getOrNull() ?: return@forEach
-                dao.update(p.copy(googlePlaceId = m.placeId, lat = m.latLng.latitude, lng = m.latLng.longitude, address = m.address))
+                dao.update(p.copy(googlePlaceId = m.placeId, lat = m.latLng.latitude, lng = m.latLng.longitude, address = m.address, cuisine = p.cuisine ?: m.cuisine, typeChecked = true))
             }
         }
     }
