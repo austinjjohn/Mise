@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.SavedPlace
+import app.mise.data.displayName
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -134,7 +135,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
         val client = LocationServices.getFusedLocationProviderClient(context)
         val loc = runCatching { client.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, null).await() }.getOrNull()
             ?: runCatching { client.lastLocation.await() }.getOrNull()
-        return loc?.let { LatLng(it.latitude, it.longitude) }?.also { userLoc = it }
+        return loc?.let { LatLng(it.latitude, it.longitude) }?.also { userLoc = it; vm.nearHint = it }
     }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -222,8 +223,8 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
             listOf(SuggestionRow("Show all ${hits.size} places matching “$q”", null, RowKind.Filter) { applyFilter(q) })
         } else emptyList()
         val mine = hits.take(4).map { (p, reason) ->
-            SuggestionRow(p.name, reason.ifBlank { listOfNotNull(p.cuisine, p.city.ifBlank { null }).joinToString(" · ") }, RowKind.Saved) {
-                typing = false; query = p.name; focusManager.clearFocus(); area = null; filter = null; pick(p)
+            SuggestionRow(p.displayName, reason.ifBlank { listOfNotNull(p.cuisine, p.city.ifBlank { null }).joinToString(" · ") }, RowKind.Saved) {
+                typing = false; query = p.displayName; focusManager.clearFocus(); area = null; filter = null; pick(p)
             }
         }
         val google = predictions.map { s ->
@@ -249,7 +250,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
     val title = when {
         activeFilter != null && sel != null -> "More “$activeFilter”"
         activeFilter != null -> "“$activeFilter”"
-        sel != null -> "Also near ${sel.name}"
+        sel != null -> "Also near ${sel.displayName}"
         area != null -> "Near ${area!!.name}"
         else -> "Near you"
     }
@@ -409,7 +410,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                                 ).joinToString(" · "),
                             )
                         },
-                    ) { Text(p.name, style = MaterialTheme.typography.titleMediumEmphasized) }
+                    ) { Text(p.displayName, style = MaterialTheme.typography.titleMediumEmphasized) }
                 }
             }
         }
@@ -450,7 +451,7 @@ private fun PlaceMarker(p: SavedPlace, pos: LatLng, selected: Boolean, showLabel
     if (alpha > 0.01f) {
         Marker(
             state = remember { MarkerState(pos) },
-            icon = remember(p.name, selected, icons) { icons.label(p.name, selected) },
+            icon = remember(p.displayName, selected, icons) { icons.label(p.displayName, selected) },
             anchor = Offset(0f, 0.5f), // label bitmap's left edge sits on the badge center
             alpha = alpha,
             zIndex = 1f,
@@ -473,7 +474,7 @@ private fun chooseLabels(
     val items = places.mapNotNull { p ->
         val pt = proj.toScreenLocation(LatLng(p.lat ?: return@mapNotNull null, p.lng ?: return@mapNotNull null))
         if (pt.x < -60 || pt.y < -60 || pt.x > w + 60 || pt.y > h + 60) null
-        else Item(p.id, p.name, pt.x.toFloat(), pt.y.toFloat(), icons.badgeRadius(p.id == selectedId))
+        else Item(p.id, p.displayName, pt.x.toFloat(), pt.y.toFloat(), icons.badgeRadius(p.id == selectedId))
     }
     val mid = proj.toScreenLocation(camera.position.target)
     val ordered = items.sortedBy { if (it.id == selectedId) -1.0 else hypot((it.x - mid.x).toDouble(), (it.y - mid.y).toDouble()) }
@@ -536,7 +537,7 @@ private fun NearbyHeader(
             ) {
                 Row(Modifier.padding(start = 20.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(focus.name, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1)
+                        Text(focus.displayName, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1)
                         val sub = listOfNotNull(rating?.let { "★ %.1f (%,d)".format(it.first, it.second) }, focus.cuisine).joinToString(" · ")
                         if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodyMedium)
                     }

@@ -14,6 +14,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.EntryKind
+import app.mise.data.ListParser
+import app.mise.data.displayName
 
 /** Check and fix how each pasted line was split, then save everything. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -21,6 +23,7 @@ import app.mise.data.EntryKind
 fun ReviewScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
     val entries by vm.review.collectAsStateWithLifecycle()
     val progress by vm.progress.collectAsStateWithLifecycle()
+    val saved by vm.places.collectAsStateWithLifecycle()
     val committing = progress.total > 0
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val shape = MaterialTheme.shapes.extraLarge
@@ -49,7 +52,11 @@ fun ReviewScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
         if (committing) {
             Column(Modifier.padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 LinearWavyProgressIndicator(progress = { progress.done / progress.total.toFloat() }, modifier = Modifier.fillMaxWidth())
-                Text("${progress.done} / ${progress.total} matched on Google Maps", style = MaterialTheme.typography.titleMediumEmphasized)
+                Text("${progress.done} / ${progress.total} processed · ${progress.added} added", style = MaterialTheme.typography.titleMediumEmphasized)
+                if (progress.skipped.isNotEmpty()) {
+                    Text("Skipped, already on your list:", style = MaterialTheme.typography.titleSmall)
+                    progress.skipped.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+                }
                 if (progress.failed.isNotEmpty()) {
                     Text("Saved without a pin (retry from the map):", style = MaterialTheme.typography.titleSmall)
                     progress.failed.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
@@ -77,6 +84,15 @@ fun ReviewScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
                                     label = { Text("Name") }, singleLine = true, shape = shape, modifier = Modifier.weight(1f),
                                 )
                                 IconButton({ vm.removeEntry(e.id) }) { Icon(Icons.Filled.Delete, "Skip this place") }
+                            }
+                            ListParser.possibleDuplicate(e.name, saved)?.let { dup ->
+                                Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.errorContainer) {
+                                    Text(
+                                        "Possible duplicate of ${dup.displayName}, it will be skipped if Google matches the same place",
+                                        Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
                             }
                             OutlinedTextField(
                                 e.location, { v -> vm.updateEntry(e.id) { it.copy(location = v) } },

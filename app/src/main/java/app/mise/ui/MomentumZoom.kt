@@ -40,27 +40,39 @@ fun Modifier.momentumZoom(camera: CameraPositionState, scope: CoroutineScope): M
         coasting?.cancel()
 
         val startY = second.position.y
-        val startZoom = camera.position.zoom
         val tracker = VelocityTracker().apply { addPosition(second.uptimeMillis, second.position) }
-        var lastY = startY
+        // (finger y, camera zoom) at every touch event, to learn how the SDK maps finger travel to zoom.
+        val ys = ArrayList<Float>().apply { add(startY) }
+        val zooms = ArrayList<Float>().apply { add(camera.position.zoom) }
         var moved = false
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Initial)
             if (event.changes.size > 1) return@awaitEachGesture // a second finger: it's a pinch, not this
             val change = event.changes.first()
             tracker.addPosition(change.uptimeMillis, change.position)
-            lastY = change.position.y
-            if (abs(lastY - startY) > viewConfiguration.touchSlop) moved = true
+            ys += change.position.y
+            zooms += camera.position.zoom
+            if (abs(change.position.y - startY) > viewConfiguration.touchSlop) moved = true
             if (!change.pressed) break
         }
         if (!moved) return@awaitEachGesture
 
-        // The SDK maps finger travel to zoom; measure that ratio from this very gesture so the coast
-        // continues in the same direction and at the same rate, whichever way the SDK maps it.
-        val travel = lastY - startY
-        val zoomed = camera.position.zoom - startZoom
-        if (abs(zoomed) < 0.05f) return@awaitEachGesture
-        val zoomVelocity = (zoomed / travel * tracker.calculateVelocity().y).coerceIn(-6f, 6f) // levels per second
+        // The camera reports its zoom a frame behind the finger. That delay shifts every sample the same
+        // way, so it doesn't change the slope of zoom against finger position. Fit that slope over the
+        // second part of the drag (zoom is already underway there) and use it, instead of comparing the
+        // zoom at release with the zoom at the start, which a quick flick makes look like "no zoom".
+        val from = ys.size / 3
+        val meanY = ys.drop(from).average().toFloat()
+        val meanZ = zooms.drop(from).average().toFloat()
+        var cross = 0f
+        var spread = 0f
+        for (i in from until ys.size) {
+            cross += (ys[i] - meanY) * (zooms[i] - meanZ)
+            spread += (ys[i] - meanY) * (ys[i] - meanY)
+        }
+        if (spread < 40f * 40f) return@awaitEachGesture // not enough finger travel to judge
+        val zoomPerPx = cross / spread
+        val zoomVelocity = (zoomPerPx * tracker.calculateVelocity().y).coerceIn(-6f, 6f) // levels per second
         if (abs(zoomVelocity) < 0.3f) return@awaitEachGesture
 
         val focus = Point(second.position.x.roundToInt(), second.position.y.roundToInt())

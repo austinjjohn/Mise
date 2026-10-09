@@ -7,13 +7,14 @@ import com.google.android.libraries.places.api.Places
 import com.google.android.libraries.places.api.model.AutocompleteSessionToken
 import com.google.android.libraries.places.api.model.CircularBounds
 import com.google.android.libraries.places.api.model.Place
+import com.google.android.libraries.places.api.model.PlaceTypes
 import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRequest
 import com.google.android.libraries.places.api.net.FetchPlaceRequest
 import com.google.android.libraries.places.api.net.SearchByTextRequest
 import kotlinx.coroutines.tasks.await
 
 /** Matched location for a list entry. */
-data class PlaceMatch(val placeId: String, val latLng: LatLng, val address: String?, val cuisine: String?)
+data class PlaceMatch(val placeId: String, val latLng: LatLng, val address: String?, val cuisine: String?, val name: String?)
 
 /** What the sheet shows from Google Maps data: just the star rating. */
 data class PlaceDetails(val rating: Double?, val ratingCount: Int?)
@@ -33,12 +34,12 @@ class PlacesRepository(context: Context) {
     /** Resolve "Name" + vague "City" into one precise place. Returns null if nothing found. */
     suspend fun match(name: String, city: String): PlaceMatch? {
         val request = SearchByTextRequest
-            .builder("$name $city", listOf(Place.Field.ID, Place.Field.LOCATION, Place.Field.FORMATTED_ADDRESS, Place.Field.PRIMARY_TYPE_DISPLAY_NAME, Place.Field.TYPES))
+            .builder("$name $city", listOf(Place.Field.ID, Place.Field.LOCATION, Place.Field.FORMATTED_ADDRESS, Place.Field.PRIMARY_TYPE_DISPLAY_NAME, Place.Field.TYPES, Place.Field.DISPLAY_NAME))
             .setMaxResultCount(1)
             .build()
         val hit = client.searchByText(request).await().places.firstOrNull() ?: return null
         val loc = hit.location ?: return null
-        return PlaceMatch(hit.id ?: return null, loc, hit.formattedAddress, cuisineOf(hit))
+        return PlaceMatch(hit.id ?: return null, loc, hit.formattedAddress, cuisineOf(hit), hit.displayName)
     }
 
     /** Turns Google's place type ("Thai Restaurant", "ramen_restaurant", "Bakery") into a short cuisine label. */
@@ -49,10 +50,23 @@ class PlacesRepository(context: Context) {
             ?.removeSuffix("_restaurant")?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }
     }
 
-    /** Just the type fields, for filling in cuisine on places that don't have one. */
-    suspend fun cuisine(googlePlaceId: String): String? {
-        val fields = listOf(Place.Field.PRIMARY_TYPE_DISPLAY_NAME, Place.Field.TYPES)
-        return cuisineOf(client.fetchPlace(FetchPlaceRequest.newInstance(googlePlaceId, fields)).await().place)
+    /** Real name and cuisine for a place we already have the id of; used to backfill older entries. */
+    suspend fun nameAndCuisine(googlePlaceId: String): Pair<String?, String?> {
+        val fields = listOf(Place.Field.DISPLAY_NAME, Place.Field.PRIMARY_TYPE_DISPLAY_NAME, Place.Field.TYPES)
+        val p = client.fetchPlace(FetchPlaceRequest.newInstance(googlePlaceId, fields)).await().place
+        return p.displayName to cuisineOf(p)
+    }
+
+    /** Full info for a place picked from autocomplete in the Add place form. */
+    suspend fun placeInfo(placeId: String): PlaceMatch? {
+        val fields = listOf(
+            Place.Field.ID, Place.Field.DISPLAY_NAME, Place.Field.LOCATION, Place.Field.FORMATTED_ADDRESS,
+            Place.Field.PRIMARY_TYPE_DISPLAY_NAME, Place.Field.TYPES,
+        )
+        val req = FetchPlaceRequest.builder(placeId, fields).setSessionToken(token).build()
+        val p = client.fetchPlace(req).await().place
+        token = AutocompleteSessionToken.newInstance()
+        return PlaceMatch(p.id ?: placeId, p.location ?: return null, p.formattedAddress, cuisineOf(p), p.displayName)
     }
 
     suspend fun details(googlePlaceId: String): PlaceDetails {
@@ -64,8 +78,9 @@ class PlacesRepository(context: Context) {
     // One session token per search: autocomplete keystrokes + the final place lookup are billed as one.
     private var token = AutocompleteSessionToken.newInstance()
 
-    suspend fun suggest(query: String, near: LatLng?): List<Suggestion> {
+    suspend fun suggest(query: String, near: LatLng?, businessesOnly: Boolean = false): List<Suggestion> {
         val b = FindAutocompletePredictionsRequest.builder().setQuery(query).setSessionToken(token)
+        if (businessesOnly) b.setTypesFilter(listOf(PlaceTypes.ESTABLISHMENT))
         near?.let { b.setLocationBias(CircularBounds.newInstance(it, 50_000.0)) }
         return client.findAutocompletePredictions(b.build()).await().autocompletePredictions.map {
             Suggestion(it.placeId, it.getPrimaryText(null).toString(), it.getSecondaryText(null)?.toString())

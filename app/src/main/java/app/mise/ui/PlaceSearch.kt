@@ -16,7 +16,7 @@ fun searchReason(place: SavedPlace, dishes: List<String>, query: String): String
     for (word in words) {
         fun has(text: String?) = text?.contains(word, ignoreCase = true) == true
         val found: String? = when {
-            has(place.name) -> ""
+            has(place.name) || has(place.googleName) -> ""
             has(place.cuisine) -> "Cuisine: ${place.cuisine}"
             dishes.any { has(it) } -> "Dish: ${dishes.first { has(it) }}"
             has(place.notes) -> "Note: ${place.notes!!.lineSequence().firstOrNull { has(it) } ?: place.notes}"

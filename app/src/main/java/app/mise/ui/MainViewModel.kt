@@ -10,7 +10,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-data class ImportProgress(val done: Int = 0, val total: Int = 0, val failed: List<String> = emptyList(), val running: Boolean = false)
+data class ImportProgress(
+    val done: Int = 0,
+    val total: Int = 0,
+    val added: Int = 0,
+    val failed: List<String> = emptyList(),
+    /** Entries skipped because the place is already on the list, e.g. "Bon Fresco sandwiches (same as Bon Fresco)". */
+    val skipped: List<String> = emptyList(),
+    val running: Boolean = false,
+)
+
+sealed interface AddResult {
+    /** [onMap] is false when Google couldn't find the place, so it was saved without a pin. */
+    data class Added(val onMap: Boolean) : AddResult
+    data class Duplicate(val existing: SavedPlace) : AddResult
+}
 
 sealed interface DetailsState {
     data object Idle : DetailsState
@@ -36,15 +50,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { backfillCuisines() }
     }
 
-    /** Fills blank cuisines from Google's place type, once per place. Network failures are retried next launch. */
+    /**
+     * Fills in Google's real name and, where blank, the cuisine for places saved earlier. Each place is
+     * handled once; network failures are retried next launch.
+     */
     private suspend fun backfillCuisines() {
-        for (p in dao.needsType()) {
-            val result = runCatching { repo.cuisine(p.googlePlaceId!!) }
-            if (result.isFailure) continue
-            dao.update(p.copy(cuisine = p.cuisine ?: result.getOrNull(), typeChecked = true))
+        for (p in dao.needsGoogleData()) {
+            val result = runCatching { repo.nameAndCuisine(p.googlePlaceId!!) }
+            val (name, cuisine) = result.getOrNull() ?: continue
+            dao.update(
+                p.copy(
+                    googleName = name?.takeIf { it.isNotBlank() } ?: p.name,
+                    cuisine = p.cuisine ?: cuisine.takeIf { !p.typeChecked },
+                    typeChecked = true,
+                ),
+            )
             delay(150)
         }
     }
+
+    /** Last known user location, used to bias autocomplete in the Add place form. */
+    var nearHint: LatLng? = null
 
     private val selectedId = MutableStateFlow<Long?>(null)
     val selected: StateFlow<SavedPlace?> =
@@ -119,16 +145,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- adding places -------------------------------------------------------
 
-    /** Manual add form. [onDone] gets true when Google found a matching location. */
-    fun addPlace(name: String, location: String, cuisine: String, dishes: String, notes: String, onDone: (Boolean) -> Unit) {
+    /** Autocomplete for the Add place form: businesses only, biased toward where the user is. */
+    suspend fun suggestPlaces(query: String): List<Suggestion> =
+        runCatching { repo.suggest(query, nearHint, businessesOnly = true) }.getOrDefault(emptyList())
+
+    /** Full details (real name, address, cuisine) of a suggestion the user picked. */
+    suspend fun resolvePlace(placeId: String): PlaceMatch? = runCatching { repo.placeInfo(placeId) }.getOrNull()
+
+    /** The saved place that [placeId] already is, if any. */
+    suspend fun existingFor(placeId: String): SavedPlace? = dao.findByGoogleId(placeId)
+
+    /**
+     * Add form. [picked] is set when the user chose an autocomplete suggestion; otherwise [text] (name and
+     * location in one string, like a Google Maps search) is looked up on Google.
+     */
+    fun addPlace(text: String, picked: PlaceMatch?, pickedCity: String?, cuisine: String, dishes: String, notes: String, onDone: (AddResult) -> Unit) {
         viewModelScope.launch {
-            onDone(savePlace(name.trim(), location.trim(), cuisine, ListParser.splitDishes(dishes), notes))
+            val result = if (picked != null) {
+                savePlace(picked.name ?: text.trim(), pickedCity.orEmpty(), cuisine, ListParser.splitDishes(dishes), notes, known = picked)
+            } else {
+                savePlace(text.trim(), "", cuisine, ListParser.splitDishes(dishes), notes)
+            }
+            onDone(result)
         }
     }
 
-    private suspend fun savePlace(name: String, location: String, cuisine: String?, dishes: List<String>, notes: String?): Boolean {
-        if (dao.countDuplicates(name, location) > 0) return true
-        val match = runCatching { repo.match(name, location) }.getOrNull()
+    /** Looks the place up on Google, refuses duplicates (by Google id, or name + city), and saves it. */
+    private suspend fun savePlace(
+        name: String, location: String, cuisine: String?, dishes: List<String>, notes: String?, known: PlaceMatch? = null,
+    ): AddResult {
+        val match = known ?: runCatching { repo.match(name, location) }.getOrNull()
+        val existing = match?.placeId?.let { dao.findByGoogleId(it) } ?: dao.findByNameAndCity(name, location)
+        if (existing != null) return AddResult.Duplicate(existing)
         val id = dao.insert(
             SavedPlace(
                 name = name, city = location,
@@ -137,11 +185,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 address = match?.address,
                 cuisine = cuisine?.trim()?.ifBlank { null } ?: match?.cuisine,
                 typeChecked = match != null,
+                googleName = match?.name,
                 notes = notes?.trim()?.ifBlank { null },
             )
         )
         dishes.forEach { dao.insertNote(DishNote(placeId = id, text = it)) }
-        return match != null
+        return AddResult.Added(onMap = match != null)
     }
 
     // --- bulk import: parse -> review -> commit ------------------------------
@@ -162,17 +211,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val entries = _review.value.filter { it.name.isNotBlank() }
         viewModelScope.launch {
             val failed = mutableListOf<String>()
+            val skipped = mutableListOf<String>()
+            var added = 0
             _progress.value = ImportProgress(total = entries.size, running = true)
             entries.forEachIndexed { i, e ->
                 val text = e.text.trim()
-                val ok = savePlace(
+                val result = savePlace(
                     name = e.name.trim(), location = e.location.trim(),
                     cuisine = text.takeIf { e.kind == EntryKind.Cuisine },
                     dishes = if (e.kind == EntryKind.Dish) ListParser.splitDishes(text) else emptyList(),
                     notes = text.takeIf { e.kind == EntryKind.Note },
                 )
-                if (!ok) failed += "${e.name} (${e.location})"
-                _progress.value = ImportProgress(i + 1, entries.size, failed.toList(), running = true)
+                when (result) {
+                    is AddResult.Duplicate -> skipped += "${e.name} (already on your list as ${result.existing.displayName})"
+                    is AddResult.Added -> { added++; if (!result.onMap) failed += "${e.name} (${e.location})" }
+                }
+                _progress.value = ImportProgress(i + 1, entries.size, added, failed.toList(), skipped.toList(), running = true)
             }
             _progress.value = _progress.value.copy(running = false)
             _review.value = emptyList()
@@ -184,7 +238,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             dao.unmatched().forEach { p ->
                 val m = runCatching { repo.match(p.name, p.city) }.getOrNull() ?: return@forEach
-                dao.update(p.copy(googlePlaceId = m.placeId, lat = m.latLng.latitude, lng = m.latLng.longitude, address = m.address, cuisine = p.cuisine ?: m.cuisine, typeChecked = true))
+                dao.update(p.copy(googlePlaceId = m.placeId, lat = m.latLng.latitude, lng = m.latLng.longitude, address = m.address, cuisine = p.cuisine ?: m.cuisine, typeChecked = true, googleName = m.name))
             }
         }
     }

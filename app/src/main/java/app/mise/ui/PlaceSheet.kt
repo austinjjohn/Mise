@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.mise.data.PlaceDetails
 import app.mise.data.SavedPlace
+import app.mise.data.displayName
 import kotlinx.coroutines.delay
 
 /** Detail sheet: star rating, then the user's dishes, notes and cuisine. */
@@ -32,7 +33,7 @@ fun PlaceSheet(vm: MainViewModel, place: SavedPlace) {
         verticalArrangement = Arrangement.spacedBy(SegmentedGap),
     ) {
         item {
-            Text(place.name, style = MaterialTheme.typography.headlineMediumEmphasized)
+            Text(place.displayName, style = MaterialTheme.typography.headlineMediumEmphasized)
             Text(place.address ?: place.city, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             when (val d = details) {

@@ -55,4 +55,20 @@ object ListParser {
     }
 
     fun splitDishes(text: String): List<String> = text.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
+    private fun normalize(text: String) = text.lowercase().filter { it.isLetterOrDigit() }
+
+    /**
+     * A saved place an entry probably already is, judged by name only (the exact check on commit uses Google's
+     * place id). Names must match, or one must contain the other once they're 6+ characters.
+     */
+    fun possibleDuplicate(name: String, places: List<SavedPlace>): SavedPlace? {
+        val n = normalize(name)
+        if (n.isEmpty()) return null
+        return places.firstOrNull { p ->
+            listOfNotNull(p.name, p.googleName).map(::normalize).any { other ->
+                other == n || (minOf(other.length, n.length) >= 6 && (other.contains(n) || n.contains(other)))
+            }
+        }
+    }
 }

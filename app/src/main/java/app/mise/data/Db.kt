@@ -20,7 +20,12 @@ data class SavedPlace(
     val notes: String? = null,
     /** True once we've asked Google for this place's type, so auto-filled cuisine is only tried once. */
     val typeChecked: Boolean = false,
+    /** The business's real name from Google Maps; shown instead of whatever the user typed. */
+    val googleName: String? = null,
 )
+
+/** Name to show for a place: Google's real name when known, otherwise what the user entered. */
+val SavedPlace.displayName: String get() = googleName?.takeIf { it.isNotBlank() } ?: name
 
 /** One bullet in a place's list: a dish tried (tried = true) or wanted (tried = false). */
 @Entity(
@@ -42,11 +47,17 @@ interface PlaceDao {
     @Query("SELECT * FROM SavedPlace WHERE lat IS NULL")
     suspend fun unmatched(): List<SavedPlace>
 
-    @Query("SELECT COUNT(*) FROM SavedPlace WHERE LOWER(name) = LOWER(:name) AND LOWER(city) = LOWER(:city)")
-    suspend fun countDuplicates(name: String, city: String): Int
+    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId = :googlePlaceId LIMIT 1")
+    suspend fun findByGoogleId(googlePlaceId: String): SavedPlace?
 
-    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId IS NOT NULL AND typeChecked = 0")
-    suspend fun needsType(): List<SavedPlace>
+    @Query(
+        "SELECT * FROM SavedPlace WHERE (LOWER(name) = LOWER(:name) OR LOWER(googleName) = LOWER(:name)) " +
+            "AND LOWER(city) = LOWER(:city) LIMIT 1",
+    )
+    suspend fun findByNameAndCity(name: String, city: String): SavedPlace?
+
+    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId IS NOT NULL AND (googleName IS NULL OR typeChecked = 0)")
+    suspend fun needsGoogleData(): List<SavedPlace>
 
     @Query("SELECT * FROM DishNote")
     fun observeAllDishes(): Flow<List<DishNote>>
@@ -63,7 +74,7 @@ interface PlaceDao {
     @Delete suspend fun deleteNote(note: DishNote)
 }
 
-@Database(entities = [SavedPlace::class, DishNote::class], version = 3, exportSchema = false)
+@Database(entities = [SavedPlace::class, DishNote::class], version = 4, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): PlaceDao
 
@@ -82,9 +93,15 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN googleName TEXT")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "mise.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
     }
 }
