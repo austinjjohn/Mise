@@ -55,18 +55,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * handled once; network failures are retried next launch.
      */
     private suspend fun backfillCuisines() {
+        // Every database write re-emits the whole list and redraws the map, so write in batches, not one by one.
+        val pending = ArrayList<SavedPlace>()
         for (p in dao.needsGoogleData()) {
             val result = runCatching { repo.nameAndCuisine(p.googlePlaceId!!) }
             val (name, cuisine) = result.getOrNull() ?: continue
-            dao.update(
-                p.copy(
-                    googleName = name?.takeIf { it.isNotBlank() } ?: p.name,
-                    cuisine = p.cuisine ?: cuisine.takeIf { !p.typeChecked },
-                    typeChecked = true,
-                ),
+            pending += p.copy(
+                googleName = name?.takeIf { it.isNotBlank() } ?: p.name,
+                cuisine = p.cuisine ?: cuisine.takeIf { !p.typeChecked },
+                typeChecked = true,
             )
-            delay(150)
+            if (pending.size >= 25) { dao.updateAll(pending.toList()); pending.clear() }
+            delay(100)
         }
+        if (pending.isNotEmpty()) dao.updateAll(pending.toList())
     }
 
     /** Last known user location, used to bias autocomplete in the Add place form. */

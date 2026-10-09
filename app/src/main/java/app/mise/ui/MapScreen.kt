@@ -275,13 +275,13 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
         )
     }
     val shownPlaces = remember(places, matchedIds) { if (matchedIds == null) places else places.filter { it.id in matchedIds } }
-    var labelIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val labelIds = remember { mutableStateOf<Set<Long>>(emptySet()) }
     var mapLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(shownPlaces, sel?.id, icons, mapLoaded) {
         if (!mapLoaded) return@LaunchedEffect
         snapshotFlow { camera.position }.collectLatest {
             delay(80)
-            labelIds = chooseLabels(shownPlaces, camera, icons, sel?.id, widthPx, heightPx)
+            labelIds.value = chooseLabels(shownPlaces, camera, icons, sel?.id, widthPx, heightPx)
         }
     }
 
@@ -308,8 +308,7 @@ private fun MapContent(vm: MainViewModel, onOpenAdd: () -> Unit, widthPx: Float,
                 val lat = p.lat ?: return@forEach
                 val lng = p.lng ?: return@forEach
                 key(p.id, lat, lng) {
-                    val isSel = p.id == sel?.id
-                    PlaceMarker(p, LatLng(lat, lng), isSel, isSel || p.id in labelIds, icons) { pick(p) }
+                    PlaceMarker(p, lat, lng, p.id == sel?.id, labelIds, icons) { pick(p) }
                 }
             }
         }
@@ -439,7 +438,12 @@ private fun CompassButton(camera: CameraPositionState, onClick: () -> Unit) {
 /** Badge marker plus a name label that fades in and out as zoom and overlap allow. */
 @Composable
 @GoogleMapComposable
-private fun PlaceMarker(p: SavedPlace, pos: LatLng, selected: Boolean, showLabel: Boolean, icons: MarkerIcons, onClick: () -> Unit) {
+private fun PlaceMarker(
+    p: SavedPlace, lat: Double, lng: Double, selected: Boolean, labelIds: State<Set<Long>>, icons: MarkerIcons, onClick: () -> Unit,
+) {
+    val pos = LatLng(lat, lng)
+    // Read inside this marker only: toggling one label doesn't recompose every other marker.
+    val showLabel by remember(p.id, selected) { derivedStateOf { selected || p.id in labelIds.value } }
     Marker(
         state = remember { MarkerState(pos) },
         icon = remember(selected, icons) { icons.badge(selected) },
@@ -447,13 +451,18 @@ private fun PlaceMarker(p: SavedPlace, pos: LatLng, selected: Boolean, showLabel
         zIndex = if (selected) 3f else 2f,
         onClick = { onClick(); true },
     )
-    val alpha by animateFloatAsState(if (showLabel) 1f else 0f, tween(220), label = "label")
-    if (alpha > 0.01f) {
+    // Creating and removing map markers is expensive, so a label marker is created the first time it's
+    // wanted and from then on only faded in and out.
+    var created by remember { mutableStateOf(false) }
+    if (showLabel && !created) created = true
+    if (created) {
+        val alpha by animateFloatAsState(if (showLabel) 1f else 0f, tween(160), label = "label")
         Marker(
             state = remember { MarkerState(pos) },
             icon = remember(p.displayName, selected, icons) { icons.label(p.displayName, selected) },
             anchor = Offset(0f, 0.5f), // label bitmap's left edge sits on the badge center
             alpha = alpha,
+            visible = alpha > 0.01f,
             zIndex = 1f,
             onClick = { onClick(); true },
         )

@@ -64,6 +64,7 @@ interface PlaceDao {
 
     @Insert suspend fun insert(place: SavedPlace): Long
     @Update suspend fun update(place: SavedPlace)
+    @Update suspend fun updateAll(places: List<SavedPlace>)
     @Delete suspend fun delete(place: SavedPlace)
 
     @Query("SELECT * FROM DishNote WHERE placeId = :placeId ORDER BY tried, id")
