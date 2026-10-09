@@ -18,7 +18,14 @@ data class SavedPlace(
     val address: String? = null,
     val cuisine: String? = null,
     val notes: String? = null,
+    /** True once we've asked Google for this place's type, so auto-filled cuisine is only tried once. */
+    val typeChecked: Boolean = false,
+    /** The business's real name from Google Maps; shown instead of whatever the user typed. */
+    val googleName: String? = null,
 )
+
+/** Name to show for a place: Google's real name when known, otherwise what the user entered. */
+val SavedPlace.displayName: String get() = googleName?.takeIf { it.isNotBlank() } ?: name
 
 /** One bullet in a place's list: a dish tried (tried = true) or wanted (tried = false). */
 @Entity(
@@ -40,11 +47,24 @@ interface PlaceDao {
     @Query("SELECT * FROM SavedPlace WHERE lat IS NULL")
     suspend fun unmatched(): List<SavedPlace>
 
-    @Query("SELECT COUNT(*) FROM SavedPlace WHERE LOWER(name) = LOWER(:name) AND LOWER(city) = LOWER(:city)")
-    suspend fun countDuplicates(name: String, city: String): Int
+    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId = :googlePlaceId LIMIT 1")
+    suspend fun findByGoogleId(googlePlaceId: String): SavedPlace?
+
+    @Query(
+        "SELECT * FROM SavedPlace WHERE (LOWER(name) = LOWER(:name) OR LOWER(googleName) = LOWER(:name)) " +
+            "AND LOWER(city) = LOWER(:city) LIMIT 1",
+    )
+    suspend fun findByNameAndCity(name: String, city: String): SavedPlace?
+
+    @Query("SELECT * FROM SavedPlace WHERE googlePlaceId IS NOT NULL AND (googleName IS NULL OR typeChecked = 0)")
+    suspend fun needsGoogleData(): List<SavedPlace>
+
+    @Query("SELECT * FROM DishNote")
+    fun observeAllDishes(): Flow<List<DishNote>>
 
     @Insert suspend fun insert(place: SavedPlace): Long
     @Update suspend fun update(place: SavedPlace)
+    @Update suspend fun updateAll(places: List<SavedPlace>)
     @Delete suspend fun delete(place: SavedPlace)
 
     @Query("SELECT * FROM DishNote WHERE placeId = :placeId ORDER BY tried, id")
@@ -55,7 +75,7 @@ interface PlaceDao {
     @Delete suspend fun deleteNote(note: DishNote)
 }
 
-@Database(entities = [SavedPlace::class, DishNote::class], version = 2, exportSchema = false)
+@Database(entities = [SavedPlace::class, DishNote::class], version = 4, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): PlaceDao
 
@@ -68,9 +88,21 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN typeChecked INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE SavedPlace ADD COLUMN googleName TEXT")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "mise.db")
-                .addMigrations(MIGRATION_1_2).build().also { instance = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
     }
 }

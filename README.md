@@ -7,7 +7,7 @@ Your food list, pinned. Android app (Kotlin · Jetpack Compose · Material 3 Exp
 2. Google Cloud Console: create a project, enable **Maps SDK for Android** and **Places API (New)**, create an API key.
    Restrict it to package `app.mise` + your debug SHA-1 (`./gradlew signingReport`).
 3. `cp local.properties.example local.properties` and paste the key.
-4. Enable USB debugging on the Pixel 8 Pro and Run.
+4. Enable USB debugging on the phone and Run.
 
 ## Structure
 - `data/Db.kt` – Room: `SavedPlace`, `DishNote`
