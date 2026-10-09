@@ -177,7 +177,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         name: String, location: String, cuisine: String?, dishes: List<String>, notes: String?, known: PlaceMatch? = null,
     ): AddResult {
         val match = known ?: runCatching { repo.match(name, location) }.getOrNull()
-        val existing = match?.placeId?.let { dao.findByGoogleId(it) } ?: dao.findByNameAndCity(name, location)
+        // Google's place id is unique to one physical location, so when we have it that is the only test:
+        // two branches with the same name get different ids. Name + city is the fallback only for entries
+        // Google couldn't find.
+        val existing = if (match != null) dao.findByGoogleId(match.placeId) else dao.findByNameAndCity(name, location)
         if (existing != null) return AddResult.Duplicate(existing)
         val id = dao.insert(
             SavedPlace(

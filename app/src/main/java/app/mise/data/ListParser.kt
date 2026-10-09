@@ -59,16 +59,29 @@ object ListParser {
     private fun normalize(text: String) = text.lowercase().filter { it.isLetterOrDigit() }
 
     /**
-     * A saved place an entry probably already is, judged by name only (the exact check on commit uses Google's
-     * place id). Names must match, or one must contain the other once they're 6+ characters.
+     * A saved place an entry probably already is, as a heads-up before importing (the exact check on commit
+     * uses Google's place id). Needs the name to match (equal, or one contains the other once 6+ characters)
+     * AND the location to be the same area, so same-named places in different cities are not flagged.
+     * An entry with no location can't be told apart by area, so only its name is compared.
      */
-    fun possibleDuplicate(name: String, places: List<SavedPlace>): SavedPlace? {
+    fun possibleDuplicate(name: String, location: String, places: List<SavedPlace>): SavedPlace? {
         val n = normalize(name)
         if (n.isEmpty()) return null
         return places.firstOrNull { p ->
-            listOfNotNull(p.name, p.googleName).map(::normalize).any { other ->
+            val sameName = listOfNotNull(p.name, p.googleName).map(::normalize).any { other ->
                 other == n || (minOf(other.length, n.length) >= 6 && (other.contains(n) || n.contains(other)))
             }
+            sameName && sameArea(location, p)
         }
+    }
+
+    /** True when [location] (like "Columbia, MD") is where [place] is, going by its saved city and Google address. */
+    private fun sameArea(location: String, place: SavedPlace): Boolean {
+        val loc = normalize(location)
+        if (loc.isEmpty()) return true
+        val city = normalize(place.city)
+        val address = normalize(place.address.orEmpty())
+        if (city.isEmpty() && address.isEmpty()) return true // nothing to compare with
+        return (city.isNotEmpty() && (city.contains(loc) || loc.contains(city))) || address.contains(loc)
     }
 }

@@ -85,7 +85,7 @@ fun ReviewScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
                                 )
                                 IconButton({ vm.removeEntry(e.id) }) { Icon(Icons.Filled.Delete, "Skip this place") }
                             }
-                            ListParser.possibleDuplicate(e.name, saved)?.let { dup ->
+                            ListParser.possibleDuplicate(e.name, e.location, saved)?.let { dup ->
                                 Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.errorContainer) {
                                     Text(
                                         "Possible duplicate of ${dup.displayName}, it will be skipped if Google matches the same place",

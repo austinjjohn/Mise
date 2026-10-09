@@ -11,6 +11,7 @@ playServicesMaps = "19.2.0"
 playServicesLocation = "21.3.0"
 places = "4.4.1"
 coroutines = "1.10.2"
+junit = "4.13.2"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -29,6 +30,7 @@ maps-compose = { module = "com.google.maps.android:maps-compose", version.ref = 
 play-services-maps = { module = "com.google.android.gms:play-services-maps", version.ref = "playServicesMaps" }
 play-services-location = { module = "com.google.android.gms:play-services-location", version.ref = "playServicesLocation" }
 places = { module = "com.google.android.libraries.places:places", version.ref = "places" }
+junit = { module = "junit:junit", version.ref = "junit" }
 coroutines-play-services = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-play-services", version.ref = "coroutines" }
 
 [plugins]

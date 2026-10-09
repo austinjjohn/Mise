@@ -68,4 +68,6 @@ dependencies {
     implementation(libs.play.services.location)
     implementation(libs.places)
     implementation(libs.coroutines.play.services)
+
+    testImplementation(libs.junit)
 }
